@@ -1191,7 +1191,7 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 					log.Printf("[%p] Loss-to-loss delivery rate: %vK @ %.2f%%", kcp, int(rate/1000), loss*100)
 				}
 				now := time.Now()
-				if rate > 1000*1000 && loss+kcp.DRE.lastLoss > 0.5 && math.Abs(kcp.DRE.lastLossRate-rate) < rate/5 && now.Sub(kcp.DRE.policeTime).Seconds() > 10 {
+				if rate > 400*1000 && loss+kcp.DRE.lastLoss > 0.5 && math.Abs(kcp.DRE.lastLossRate-rate) < rate/5 && now.Sub(kcp.DRE.policeTime).Seconds() > 10 {
 					if doLogging {
 						log.Printf("[%p] ****** POLICE ******", kcp)
 					}
