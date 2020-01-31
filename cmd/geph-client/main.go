@@ -246,6 +246,12 @@ func main() {
 			}
 			ip = strings.TrimSpace(ip)
 			log.Println("Successfully got external IP", ip)
+			// also save external IP to a file
+			f, err := os.Create("/tmp/gcexip")
+			if err == nil {
+				f.WriteString("External IP: " + ip + "\n")
+				f.Close()
+			}
 			useStats(func(sc *stats) {
 				sc.Connected = true
 				sc.PublicIP = ip
