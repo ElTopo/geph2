@@ -46,6 +46,9 @@ func listenHTTP() {
 	blankLogger := log.New()
 	blankLogger.SetOutput(ioutil.Discard)
 	srv.Logger = blankLogger
+	srv.NonproxyHandler = http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		http.Error(w, "Nothing here.", 500)
+	})
 	proxServ := &http.Server{
 		Addr:        httpAddr,
 		Handler:     srv,
