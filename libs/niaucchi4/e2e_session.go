@@ -73,6 +73,8 @@ type e2eLinkInfo struct {
 	recvsn  uint64
 	recvcnt uint64
 
+	recvWindow replayWindow
+
 	txCount   uint64
 	rtxCount  uint64
 	checkTime time.Time
@@ -89,12 +91,15 @@ func (el *e2eLinkInfo) getScore() float64 {
 	// return math.Max(float64(el.lastPing), float64(time.Since(el.lastSendTime).Milliseconds())) + recvLoss*100
 	now := time.Now()
 	if now.Sub(el.checkTime).Seconds() > 5 {
-		el.rtxCount /= 2
-		el.txCount /= 2
-		el.checkTime = now
+		// ensure accurate measurement
+		if el.txCount > 1000 {
+			el.rtxCount /= 2
+			el.txCount /= 2
+			el.checkTime = now
+		}
 	}
 	factor := math.Max(float64(el.lastPing), float64(time.Since(el.lastProbeTime).Milliseconds()))
-	loss := float64(el.rtxCount) / float64(el.txCount+1)
+	loss := float64(el.rtxCount) / float64(el.txCount+1000)
 	return factor + loss*1000
 	// return el.longLoss
 }
@@ -141,7 +146,7 @@ func (es *e2eSession) AddPath(host net.Addr) {
 		}
 	}
 	if doLogging {
-		log.Println("N4: adding new path", host)
+		log.Printf("N4: [%p] adding new path %v", es, host)
 	}
 	es.remote = append(es.remote, host)
 	es.info = append(es.info, &e2eLinkInfo{lastPing: 10000000})
@@ -170,14 +175,13 @@ func (es *e2eSession) Input(pkt e2ePacket, source net.Addr) {
 		return
 	}
 	// parse the stuff
-	if pkt.Sn < es.info[remid].recvsn {
-		if pkt.Sn+4096 < es.info[remid].recvsn {
-			if doLogging {
-				log.Println("N4: discarding", pkt.Sn, "<", es.info[remid].recvsn)
-			}
-			return
+	if !es.info[remid].recvWindow.check(pkt.Sn) {
+		if doLogging {
+			log.Println("N4: discarding", pkt.Sn, "<", es.info[remid].recvsn)
 		}
-	} else {
+		return
+	}
+	if es.info[remid].recvsn < pkt.Sn {
 		es.info[remid].recvsn = pkt.Sn
 		es.info[remid].acksn = pkt.Ack
 	}
