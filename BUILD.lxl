@@ -1,0 +1,7 @@
+Dependencies:
+	geph-binder needs libsodium-dev and libgeoip-dev packages.
+
+Install dependencies:
+	sudo apt install libsodium-dev libgeoip-dev
+
+
