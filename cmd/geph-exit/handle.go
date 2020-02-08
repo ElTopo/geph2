@@ -30,6 +30,7 @@ func init() {
 		"10.0.0.0/8",
 		"172.16.0.0/12",
 		"192.168.0.0/16",
+		"::1/128",
 	} {
 		_, n, _ := net.ParseCIDR(s)
 		cidrBlacklist = append(cidrBlacklist, n)
@@ -195,12 +196,19 @@ func handle(rawClient net.Conn) {
 				rlp.Encode(soxclient, true)
 				dialStart := time.Now()
 				host := command[1]
-				tcpAddr, err := net.ResolveTCPAddr("tcp4", host)
-				if err != nil || isBlack(tcpAddr) {
-					return
+				var remote net.Conn
+				for _, ntype := range []string{"tcp6", "tcp4"} {
+					tcpAddr, err := net.ResolveTCPAddr(ntype, host)
+					if err != nil || isBlack(tcpAddr) {
+						continue
+					}
+					remote, err = net.DialTimeout("tcp", tcpAddr.String(), time.Second*30)
+					if err != nil {
+						continue
+					}
+					break
 				}
-				remote, err := net.DialTimeout("tcp", tcpAddr.String(), time.Second*30)
-				if err != nil {
+				if remote == nil {
 					return
 				}
 				// measure dial latency
@@ -247,6 +255,7 @@ func handle(rawClient net.Conn) {
 						return
 					}
 					ip = string(ipb)
+					ipcache.SetDefault("ip", ip)
 				}
 				rlp.Encode(soxclient, true)
 				rlp.Encode(soxclient, ip)

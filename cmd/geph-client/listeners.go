@@ -15,6 +15,7 @@ import (
 )
 
 func listenStats() {
+	log.Infoln("STATS on", httpAddr)
 	// spin up stats server
 	statsMux := http.NewServeMux()
 	statsServ := &http.Server{
@@ -34,6 +35,7 @@ func listenStats() {
 }
 
 func listenHTTP() {
+	log.Infoln("HTTP on", httpAddr)
 	// HTTP proxy
 	srv := goproxy.NewProxyHttpServer()
 	srv.Tr = &http.Transport{
@@ -74,7 +76,7 @@ func listenSocks() {
 			upLimit = rate.NewLimiter(100*1000, 1000*1000)
 		}
 	})
-	log.Println("SOCKS5 on 9909")
+	log.Infoln("SOCKS5 on", socksAddr)
 	for {
 		cl, err := listener.Accept()
 		if err != nil {
@@ -90,9 +92,21 @@ func listenSocks() {
 			default:
 				return
 			}
-			rmAddr, err := tinysocks.ReadRequest(cl)
+			cmd, rmAddrProt, err := tinysocks.ReadRequest(cl)
 			if err != nil {
+				log.Debugln("Bad SOCKS5 request:", err)
 				return
+			}
+			if cmd != tinysocks.CmdConnect {
+				log.Debugln("Unsupported command:", cmd)
+				tinysocks.CompleteRequestTCP(7, cl)
+				return
+			}
+			rmAddr := rmAddrProt.String()
+			host, port, err := net.SplitHostPort(rmAddr)
+			if realName := fakeIPToName(host); realName != "" {
+				log.Debugf("[%v] mapped fake IP %v => %v", len(semaphore), host, realName)
+				rmAddr = net.JoinHostPort(realName, port)
 			}
 			start := time.Now()
 			remote, ok := sWrap.DialCmd("proxy", rmAddr)
@@ -110,10 +124,10 @@ func listenSocks() {
 				}
 			})
 			if !ok {
-				tinysocks.CompleteRequest(5, cl)
+				tinysocks.CompleteRequestTCP(5, cl)
 				return
 			}
-			tinysocks.CompleteRequest(0, cl)
+			tinysocks.CompleteRequestTCP(0, cl)
 			go func() {
 				defer remote.Close()
 				defer cl.Close()

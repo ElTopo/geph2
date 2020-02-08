@@ -7,14 +7,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/rand"
 	mrand "math/rand"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/rlp"
-	"github.com/geph-official/geph2/libs/kcp-go"
-	"github.com/geph-official/geph2/libs/niaucchi4"
+	"github.com/geph-official/geph2/libs/cshirt2"
 	"github.com/patrickmn/go-cache"
 )
 
@@ -64,17 +65,39 @@ func getBridges(id string) []string {
 		}
 	}
 	//bridgeMapCache.SetDefault(id, toret)
+
+	// shuffle
+	rand.Shuffle(len(toret), func(i, j int) {
+		toret[i], toret[j] = toret[j], toret[i]
+	})
 	return toret
 }
 
 func handleGetBridges(w http.ResponseWriter, r *http.Request) {
+	isEphemeral := r.FormValue("type") == "ephemeral"
+	exitHost := r.FormValue("exit")
 	// TODO validate the ticket
 	bridges := getBridges(fmt.Sprintf("%v", mrand.Int()))
 	w.Header().Set("content-type", "application/json")
+	seenIPs := make(map[string]bool)
 	var laboo []bridgeInfo
 	for _, str := range bridges {
-		if val, ok := bridgeCache.Get(str); ok {
-			laboo = append(laboo, val.(bridgeInfo))
+		if vali, ok := bridgeCache.Get(str); ok {
+			val := vali.(bridgeInfo)
+			ip := strings.Split(val.Host, ":")[0]
+			if !seenIPs[ip] {
+				if isEphemeral {
+					tval, err := bridgeToEphBridge(val.Host, val.Cookie, exitHost)
+					if err != nil {
+						log.Println("error mapping ephemeral bridge for", val.Host, err)
+						continue
+					}
+					val.Cookie = tval.Cookie
+					val.Host = tval.Bridge
+				}
+				seenIPs[ip] = true
+				laboo = append(laboo, val)
+			}
 		}
 	}
 	json.NewEncoder(w).Encode(laboo)
@@ -112,26 +135,21 @@ func handleAddBridge(w http.ResponseWriter, r *http.Request) {
 }
 
 func testBridge(bi bridgeInfo) bool {
-	udpsock, err := net.ListenPacket("udp", ":")
+	rawconn, err := net.Dial("tcp", bi.Host)
 	if err != nil {
-		panic(err)
+		return false
 	}
-	defer udpsock.Close()
-	e2e := niaucchi4.ObfsListen(bi.Cookie, udpsock)
+	defer rawconn.Close()
+	realconn, err := cshirt2.Client(bi.Cookie, rawconn)
 	if err != nil {
-		panic(err)
+		return false
 	}
-	defer e2e.Close()
-	kcp, err := kcp.NewConn(bi.Host, nil, 0, 0, e2e)
-	if err != nil {
-		panic(err)
-	}
-	defer kcp.Close()
-	kcp.SetDeadline(time.Now().Add(time.Second * 10))
+	defer realconn.Close()
+	realconn.SetDeadline(time.Now().Add(time.Second * 10))
 	start := time.Now()
-	rlp.Encode(kcp, "ping")
+	rlp.Encode(realconn, "ping")
 	var resp string
-	rlp.Decode(kcp, &resp)
+	rlp.Decode(realconn, &resp)
 	if resp != "ping" {
 		log.Println(bi.Host, "failed ping test!")
 		return false

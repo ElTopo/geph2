@@ -1,6 +1,7 @@
 package niaucchi4
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -105,11 +106,14 @@ func (e2e *E2EConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	sess := sessi.(*e2eSession)
 	e2e.sidToSess.SetDefault(sessid.String(), sess)
 	err = sess.Send(p, func(toSend e2ePacket, dest net.Addr) {
-		tsBts, err := rlp.EncodeToBytes(toSend)
+		buffer := malloc(2048)
+		defer free(buffer)
+		buf := bytes.NewBuffer(buffer[:0])
+		err = rlp.Encode(buf, toSend)
 		if err != nil {
 			panic(err)
 		}
-		e2e.wire.WriteTo(tsBts, dest)
+		e2e.wire.WriteTo(buf.Bytes(), dest)
 	})
 	if err != nil {
 		return
