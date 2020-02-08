@@ -1,7 +1,7 @@
 GO=go
-GOBUILDFLAG = -x -v
+GOBUILDFLAG = -v
 
-all: client bridge binder exit
+all: geph-client geph-bridge geph-binder geph-exit
 
 remake: 
 	 $(GO) build $(GOBUILDFLAG) -a ./cmd/geph-client/
@@ -9,15 +9,15 @@ remake:
 	 $(GO) build $(GOBUILDFLAG) -a ./cmd/geph-binder/
 	 $(GO) build $(GOBUILDFLAG) -a ./cmd/geph-exit/
 
-client: geph-client
-	$(GO) build $(GOBUILDFLAG) -o $< ./cmd/geph-client/
+geph-client: $(wildcard ./cmd/geph-client/*.go)
+	$(GO) build $(GOBUILDFLAG) -o $@ ./cmd/geph-client/
 
-bridge: geph-bridge
-	$(GO) build $(GOBUILDFLAG) -o $< ./cmd/geph-bridge/
+geph-bridge: $(wildcard ./cmd/geph-bridge/*.go)
+	$(GO) build $(GOBUILDFLAG) -o $@ ./cmd/geph-bridge/
 
-binder: geph-binder
-	$(GO) build $(GOBUILDFLAG) -o $< ./cmd/geph-binder/
+geph-binder: $(wildcard ./cmd/geph-binder/*.go)
+	$(GO) build $(GOBUILDFLAG) -o $@ ./cmd/geph-binder/
 
-exit: geph-exit
-	$(GO) build $(GOBUILDFLAG) -o $< ./cmd/geph-exit/
+geph-exit: $(wildcard ./cmd/geph-exit/*.go)
+	$(GO) build $(GOBUILDFLAG) -o $@ ./cmd/geph-exit/
 
