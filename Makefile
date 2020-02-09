@@ -6,7 +6,7 @@ GOFMT = gofmt
 all: geph-client geph-bridge geph-binder geph-exit
 
 geph-client: $(wildcard ./cmd/geph-client/*.go)
-	-$(GOBUILD) -o $@ ./cmd/geph-client/
+	$(GOBUILD) -o $@ ./cmd/geph-client/
 
 geph-bridge: $(wildcard ./cmd/geph-bridge/*.go)
 	-$(GOBUILD) -o $@ ./cmd/geph-bridge/
@@ -15,7 +15,7 @@ geph-binder: $(wildcard ./cmd/geph-binder/*.go)
 	-$(GOBUILD) -o $@ ./cmd/geph-binder/
 
 geph-exit: $(wildcard ./cmd/geph-exit/*.go)
-	$(GOBUILD) -o $@ ./cmd/geph-exit/
+	-$(GOBUILD) -o $@ ./cmd/geph-exit/
 
 # other tools
 remake: 
