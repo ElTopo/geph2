@@ -18,11 +18,15 @@ geph-exit: $(wildcard ./cmd/geph-exit/*.go)
 	-$(GOBUILD) -o $@ ./cmd/geph-exit/
 
 # other tools
-remake: 
-	 $(GOBUILD) -a ./cmd/geph-client/
-	 -$(GOBUILD) -a ./cmd/geph-bridge/
-	 -$(GOBUILD) -a ./cmd/geph-binder/
-	 -$(GOBUILD) -a ./cmd/geph-exit/
+fresh:
+	rm -f geph-client geph-bridge geph-binder geph-exit
+	$(MAKE) all
+
+rebuild:
+	$(GOBUILD) -a -o geph-client ./cmd/geph-client/
+	-$(GOBUILD) -a -o geph-bridge ./cmd/geph-bridge/
+	-$(GOBUILD) -a -o geph-binder ./cmd/geph-binder/
+	-$(GOBUILD) -a -o geph-exit ./cmd/geph-exit/
 
 chkfmt:
 	@$(GOFMT) -l $(wildcard ./cmd/geph-client/*.go)
