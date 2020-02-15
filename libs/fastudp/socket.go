@@ -1,6 +1,7 @@
 package fastudp
 
 import (
+	"context"
 	"io"
 	"net"
 	"runtime"
@@ -26,6 +27,15 @@ type Conn struct {
 
 // NewConn creates a new Conn.
 func NewConn(conn *net.UDPConn) net.PacketConn {
+	err := conn.SetWriteBuffer(262144)
+	if err != nil {
+		panic(err)
+	}
+	err = conn.SetReadBuffer(262144)
+	if err != nil {
+		panic(err)
+	}
+	//return conn
 	if runtime.GOOS != "linux" {
 		return conn
 	}
@@ -45,6 +55,7 @@ func NewConn(conn *net.UDPConn) net.PacketConn {
 	return c
 }
 
+// 100Hz syscall limiter
 var limiter = rate.NewLimiter(100, 100)
 
 var spamLimiter = rate.NewLimiter(1, 10)
@@ -55,7 +66,7 @@ func (conn *Conn) bkgWrite() {
 	//
 	var towrite []ipv4.Message
 	for {
-		//limiter.Wait(context.Background())
+		limiter.Wait(context.Background())
 		select {
 		case first := <-conn.writeBuf:
 			towrite = append(towrite, first)

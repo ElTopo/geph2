@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/rlp"
+	"github.com/geph-official/geph2/libs/fastudp"
 	"github.com/geph-official/geph2/libs/niaucchi4"
 	"github.com/patrickmn/go-cache"
 )
@@ -50,34 +51,31 @@ var e2eMap = cache.New(time.Hour, time.Hour)
 var e2eMapLk sync.Mutex
 
 func e2enat(dest string, cookie []byte) (port int, err error) {
-	e2eMapLk.Lock()
-	defer e2eMapLk.Unlock()
-	log.Println("e2enat", atomic.LoadInt64(&e2ecount))
-	kee := fmt.Sprintf("%v/%x", dest, cookie)
-	if porti, ok := e2eMap.Get(kee); ok {
-		log.Println("HIT", kee)
-		port = porti.(int)
-		return
-	}
-	log.Println("MISS", kee)
+	// e2eMapLk.Lock()
+	// defer e2eMapLk.Unlock()
+	// log.Println("e2enat", atomic.LoadInt64(&e2ecount))
+	// kee := fmt.Sprintf("%v/%x", dest, cookie)
+	// if porti, ok := e2eMap.Get(kee); ok {
+	// 	log.Println("HIT", kee)
+	// 	port = porti.(int)
+	// 	return
+	// }
+	// log.Println("MISS", kee)
 	leftRaw, err := net.ListenPacket("udp", "")
 	if err != nil {
 		return
 	}
+	leftRaw = fastudp.NewConn(leftRaw.(*net.UDPConn))
 	leftSock := niaucchi4.ObfsListen(cookie, leftRaw)
 	rightSock, err := net.ListenPacket("udp", "")
 	if err != nil {
 		return
 	}
-	leftRaw.(*net.UDPConn).SetReadBuffer(1000 * 1024)
-	leftRaw.(*net.UDPConn).SetWriteBuffer(1000 * 1024)
-	rightSock.(*net.UDPConn).SetWriteBuffer(1000 * 1024)
-	rightSock.(*net.UDPConn).SetReadBuffer(1000 * 1024)
 	destReal, err := net.ResolveUDPAddr("udp", dest)
 	if err != nil {
 		return
 	}
-	//rightSock = fastudp.NewConn(rightSock.(*net.UDPConn))
+	rightSock = fastudp.NewConn(rightSock.(*net.UDPConn))
 	// mapping
 	sessMap := new(sync.Map)
 	go func() {
@@ -133,6 +131,6 @@ func e2enat(dest string, cookie []byte) (port int, err error) {
 			}
 		}
 	}()
-	e2eMap.SetDefault(kee, leftRaw.LocalAddr().(*net.UDPAddr).Port)
+	//e2eMap.SetDefault(kee, leftRaw.LocalAddr().(*net.UDPAddr).Port)
 	return leftRaw.LocalAddr().(*net.UDPAddr).Port, nil
 }
