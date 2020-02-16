@@ -31,6 +31,7 @@ var binderReal string
 var bclient *bdclient.Client
 var hostname string
 var statsdAddr string
+var speedLimit int
 
 var statClient *statsd.StatsdClient
 
@@ -46,6 +47,7 @@ func main() {
 	flag.StringVar(&binderReal, "binderReal", "binder.geph.io", "real hostname of the binder")
 	flag.StringVar(&statsdAddr, "statsdAddr", "c2.geph.io:8125", "address of StatsD for gathering statistics")
 	flag.BoolVar(&onlyPaid, "onlyPaid", false, "only allow paying users")
+	flag.IntVar(&speedLimit, "speedLimit", 12500, "per-session speed limit, in KB/s")
 	flag.StringVar(&singleHop, "singleHop", "", "if supplied, runs in single-hop mode. (for example, -singleHop :5000 would listen on port 5000)")
 	flag.Parse()
 	go func() {
@@ -116,7 +118,7 @@ func e2elisten() {
 	udpsock.(*net.UDPConn).SetWriteBuffer(100 * 1024 * 1024)
 	udpsock.(*net.UDPConn).SetReadBuffer(100 * 1024 * 1024)
 	log.Infoln("e2elisten on UDP 2399")
-	e2e := niaucchi4.NewE2EConn(fastudp.NewConn(udpsock.(*net.UDPConn)))
+	e2e := niaucchi4.NewE2EConn(udpsock)
 	kcpListener := niaucchi4.ListenKCP(e2e)
 	for {
 		rc, err := kcpListener.Accept()
@@ -125,7 +127,7 @@ func e2elisten() {
 			continue
 		}
 		rc.SetWindowSize(10000, 1000)
-		rc.SetNoDelay(0, 10, 3, 0)
+		rc.SetNoDelay(0, 50, 3, 0)
 		rc.SetStreamMode(true)
 		rc.SetMtu(1300)
 		go handle(rc)

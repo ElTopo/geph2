@@ -11,8 +11,10 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/rlp"
+	"github.com/geph-official/geph2/libs/fastudp"
 	"github.com/geph-official/geph2/libs/niaucchi4"
 	"github.com/patrickmn/go-cache"
+	"golang.org/x/time/rate"
 )
 
 type e2ePacket struct {
@@ -50,34 +52,31 @@ var e2eMap = cache.New(time.Hour, time.Hour)
 var e2eMapLk sync.Mutex
 
 func e2enat(dest string, cookie []byte) (port int, err error) {
-	e2eMapLk.Lock()
-	defer e2eMapLk.Unlock()
-	log.Println("e2enat", atomic.LoadInt64(&e2ecount))
-	kee := fmt.Sprintf("%v/%x", dest, cookie)
-	if porti, ok := e2eMap.Get(kee); ok {
-		log.Println("HIT", kee)
-		port = porti.(int)
-		return
-	}
-	log.Println("MISS", kee)
+	// e2eMapLk.Lock()
+	// defer e2eMapLk.Unlock()
+	// log.Println("e2enat", atomic.LoadInt64(&e2ecount))
+	// kee := fmt.Sprintf("%v/%x", dest, cookie)
+	// if porti, ok := e2eMap.Get(kee); ok {
+	// 	log.Println("HIT", kee)
+	// 	port = porti.(int)
+	// 	return
+	// }
+	// log.Println("MISS", kee)
 	leftRaw, err := net.ListenPacket("udp", "")
 	if err != nil {
 		return
 	}
+	leftRaw = fastudp.NewConn(leftRaw.(*net.UDPConn))
 	leftSock := niaucchi4.ObfsListen(cookie, leftRaw)
 	rightSock, err := net.ListenPacket("udp", "")
 	if err != nil {
 		return
 	}
-	leftRaw.(*net.UDPConn).SetReadBuffer(1000 * 1024)
-	leftRaw.(*net.UDPConn).SetWriteBuffer(1000 * 1024)
-	rightSock.(*net.UDPConn).SetWriteBuffer(1000 * 1024)
-	rightSock.(*net.UDPConn).SetReadBuffer(1000 * 1024)
 	destReal, err := net.ResolveUDPAddr("udp", dest)
 	if err != nil {
 		return
 	}
-	//rightSock = fastudp.NewConn(rightSock.(*net.UDPConn))
+	rightSock = fastudp.NewConn(rightSock.(*net.UDPConn))
 	// mapping
 	sessMap := new(sync.Map)
 	go func() {
@@ -85,7 +84,7 @@ func e2enat(dest string, cookie []byte) (port int, err error) {
 		defer atomic.AddInt64(&e2ecount, -1)
 		defer leftSock.Close()
 		defer rightSock.Close()
-		bts := make([]byte, 2048)
+		bts := malloc(2048)
 		for {
 			dl := time.Now().Add(time.Hour * 2)
 			leftSock.SetReadDeadline(dl)
@@ -94,22 +93,26 @@ func e2enat(dest string, cookie []byte) (port int, err error) {
 				log.Println("closing", leftRaw.LocalAddr(), err)
 				return
 			}
-			rightSock.SetWriteDeadline(dl)
 			sid := parseSess(bts[:n])
 			sessMap.Store(sid, addr)
-			_, err = rightSock.WriteTo(bts[:n], destReal)
-			if err != nil {
-				log.Println("cannot write:", err)
-			}
-			if statClient != nil && rand.Int()%100000 < n {
-				statClient.Increment(allocGroup + ".e2eup")
-			}
+			btsCopy := malloc(n)
+			copy(btsCopy, bts)
+			maybeDoJob(func() {
+				_, err = rightSock.WriteTo(btsCopy, destReal)
+				if err != nil {
+					log.Println("cannot write:", err)
+				}
+				if statClient != nil && rand.Int()%100000 < n {
+					statClient.Increment(allocGroup + ".e2eup")
+				}
+				free(btsCopy)
+			})
 		}
 	}()
 	go func() {
 		defer leftSock.Close()
 		defer rightSock.Close()
-		bts := make([]byte, 2048)
+		bts := malloc(2048)
 		for {
 			dl := time.Now().Add(time.Hour * 2)
 			rightSock.SetReadDeadline(dl)
@@ -121,18 +124,32 @@ func e2enat(dest string, cookie []byte) (port int, err error) {
 			leftSock.SetWriteDeadline(dl)
 			sid := parseSess(bts[:n])
 			if addri, ok := sessMap.Load(sid); ok {
-				if limiter.AllowN(time.Now(), n) {
-					_, e = leftSock.WriteTo(bts[:n], addri.(net.Addr))
-					if err != nil {
-						log.Println("cannot write:", err)
+				btsCopy := malloc(n)
+				copy(btsCopy, bts)
+				start := time.Now()
+				maybeDoJob(func() {
+					if limiter.AllowN(time.Now(), n) {
+						_, e = leftSock.WriteTo(btsCopy, addri.(net.Addr))
+						if err != nil {
+							log.Println("cannot write:", err)
+						}
+						free(btsCopy)
+						if statClient != nil {
+							inducedLatency := time.Since(start)
+							if rand.Int()%100000 < n {
+								statClient.Increment(allocGroup + ".e2edown")
+							}
+							if queueReportLimiter.Allow() {
+								statClient.Timing(allocGroup+".queuens", inducedLatency.Nanoseconds())
+							}
+						}
 					}
-				}
-			}
-			if statClient != nil && rand.Int()%100000 < n {
-				statClient.Increment(allocGroup + ".e2edown")
+				})
 			}
 		}
 	}()
-	e2eMap.SetDefault(kee, leftRaw.LocalAddr().(*net.UDPAddr).Port)
+	//e2eMap.SetDefault(kee, leftRaw.LocalAddr().(*net.UDPAddr).Port)
 	return leftRaw.LocalAddr().(*net.UDPAddr).Port, nil
 }
+
+var queueReportLimiter = rate.NewLimiter(100, 1000)
