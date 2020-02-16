@@ -1,4 +1,4 @@
-GO=go
+GO = go
 GOBUILDFLAG = -v
 GOBUILD = $(GO) build $(GOBUILDFLAG)
 GOFMT = gofmt
@@ -39,4 +39,6 @@ fmt:
 	@$(GOFMT) -w $(wildcard ./cmd/geph-bridge/*.go)
 	@$(GOFMT) -w $(wildcard ./cmd/geph-binder/*.go)
 	@$(GOFMT) -w $(wildcard ./cmd/geph-exit/*.go)
+
+.PHONY: all fresh rebuild chkfmt fmt
 
