@@ -193,9 +193,10 @@ type KCP struct {
 
 	isDead bool
 
-	wmax    float64
-	retrans uint64
-	trans   uint64
+	wmax     float64
+	lastLoss time.Time
+	retrans  uint64
+	trans    uint64
 
 	pacer rateLimiter
 
@@ -519,7 +520,7 @@ func (kcp *KCP) update_ack(rtt int32) {
 	// if kcp.rx_rto < 500 {
 	// 	kcp.rx_rto = 500
 	// }
-	kcp.rx_rto += 1500
+	kcp.rx_rto += 300
 }
 
 func (kcp *KCP) shrink_buf() {
@@ -789,17 +790,19 @@ func (kcp *KCP) Input(data []byte, regular, ackNoDelay bool) int {
 			switch CongestionControl {
 			case "BIC":
 				kcp.bic_onack(acks)
+			case "CUBIC":
+				kcp.cubic_onack(acks)
 			case "VGS":
 				kcp.vgs_onack(acks)
 			case "LOL":
 				bdp := kcp.bdp() / float64(kcp.mss)
-				targetCwnd := bdp*2 + 64
-				//targetCwnd := bdp * 2
+				targetCwnd := bdp*3 + 64
 				if targetCwnd > kcp.cwnd+float64(acks) {
-					kcp.cwnd += 64 * float64(acks) / kcp.cwnd
+					kcp.cwnd += math.Min(float64(acks), 32*float64(acks)/kcp.cwnd)
 				} else {
 					kcp.cwnd = targetCwnd
 				}
+				kcp.cwnd = targetCwnd
 				if kcp.cwnd < 16 {
 					kcp.cwnd = 16
 				}
@@ -824,16 +827,16 @@ func (kcp *KCP) Input(data []byte, regular, ackNoDelay bool) int {
 				} else {
 					// vibrate the gain up and down every 50 rtts
 					period := int(float64(time.Now().UnixNano()) / 1e6 / kcp.DRE.minRtt)
-					if period%10 == 0 {
+					if period%5 == 0 {
 						kcp.LOL.gain = 1.5
-					} else if period%10 == 1 {
+					} else if period%5 == 1 {
 						kcp.LOL.gain = 0.5
 					} else {
 						kcp.LOL.gain = 1
 					}
-					if period%100 == 0 {
-						kcp.LOL.gain = 0.2
-					}
+					// if period%100 == 0 {
+					// 	kcp.LOL.gain = 0.2
+					// }
 					// if period%3 == 0 {
 					// 	kcp.LOL.gain = 1.5
 					// } else if period%3 == 1 {
@@ -1181,10 +1184,15 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 			if sum > 0 {
 				kcp.bic_onloss(lostSn)
 			}
+		case "CUBIC":
+			// congestion control, https://tools.ietf.org/html/rfc5681
+			if sum > 0 {
+				kcp.cubic_onloss(lostSn)
+			}
 		case "LOL":
-			// if sum > 0 {
-			// 	kcp.DRE.maxAckRate *= 0.95
-			// }
+			if sum > 0 {
+				kcp.cwnd = math.Min(kcp.cwnd, kcp.bdp()/float64(kcp.mss))
+			}
 		case "VGS":
 		}
 		if sum > 0 {
