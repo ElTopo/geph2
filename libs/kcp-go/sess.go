@@ -67,6 +67,7 @@ type (
 	}
 	// UDPSession defines a KCP session implemented by UDP
 	UDPSession struct {
+		lastFecRate  float64
 		updaterIdx   int            // record slice index in updater
 		conn         net.PacketConn // the underlying packet connection
 		lossReporter LossReporter
@@ -684,6 +685,12 @@ func (s *UDPSession) output(buf []byte) {
 		//log.Println("LOSS REPORTER", s.lossReporter.UnderlyingLoss(s.remote))
 		loss := s.lossReporter.UnderlyingLoss(s.remote)
 		fecRate = loss2fecfrac(loss)
+		if fecRate != s.lastFecRate {
+			if doLogging {
+				log.Println("fec rate is", fecRate, loss)
+			}
+			s.lastFecRate = fecRate
+		}
 	}
 	for k := range ecc {
 		if float64(k) < float64(len(ecc))*fecRate {
