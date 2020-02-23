@@ -181,6 +181,8 @@ func main() {
 	go listenStats()
 
 	log.Println("GephNG version", GitVersion)
+	log.Println("OS: ", runtime.GOOS)
+	log.Println("Architecture: ", runtime.GOARCH)
 	// special actions
 	if loginCheck {
 		log.Println("loginCheck mode")
