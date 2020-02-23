@@ -7,3 +7,7 @@ Install build dependencies:
 
 Install runtime dependencies:
 	sudo apt install geoip-database
+
+Cross Compiling:
+	set GOOS and GOARCH, for example, to build geph-client executable for Windows x64:
+	GOOS=windows GOARCH=amd64 make geph-client
