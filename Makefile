@@ -2,7 +2,8 @@ GO = go
 GOBUILDFLAG = -v
 GITBRANCH = $(shell git rev-parse --abbrev-ref HEAD)
 GITREVISION = $(shell git rev-parse --short HEAD)
-LDFLAGS = -ldflags "-X main.GitVersion=$(GITBRANCH)-$(GITREVISION)"
+GITDIRTY = $(shell git diff-index --quiet HEAD -- || echo "+")
+LDFLAGS = -ldflags "-X main.GitVersion=$(GITBRANCH)-$(GITREVISION)$(GITDIRTY)"
 GOBUILD = $(GO) build $(GOBUILDFLAG) $(LDFLAGS)
 GOFMT = gofmt
 
