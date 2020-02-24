@@ -1,6 +1,9 @@
 GO = go
 GOBUILDFLAG = -v
-GOBUILD = $(GO) build $(GOBUILDFLAG)
+GITBRANCH = $(shell git rev-parse --abbrev-ref HEAD)
+GITREVISION = $(shell git rev-parse --short HEAD)
+LDFLAGS = -ldflags "-X main.GitVersion=$(GITBRANCH)-$(GITREVISION)"
+GOBUILD = $(GO) build $(GOBUILDFLAG) $(LDFLAGS)
 GOFMT = gofmt
 
 all: geph-client geph-bridge geph-binder geph-exit
