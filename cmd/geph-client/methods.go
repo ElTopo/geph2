@@ -12,7 +12,6 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/geph-official/geph2/libs/bdclient"
 	"github.com/geph-official/geph2/libs/cshirt2"
-	"github.com/geph-official/geph2/libs/fastudp"
 	"github.com/geph-official/geph2/libs/kcp-go"
 	"github.com/geph-official/geph2/libs/niaucchi4"
 	log "github.com/sirupsen/logrus"
@@ -127,9 +126,9 @@ func getMultipath(bridges []bdclient.BridgeInfo, legacy bool) (conn net.Conn, er
 		if err != nil {
 			panic(err)
 		}
-		us.(*net.UDPConn).SetReadBuffer(10 * 1024 * 1024)
-		us.(*net.UDPConn).SetWriteBuffer(10 * 1024 * 1024)
-		return fastudp.NewConn(us.(*net.UDPConn))
+		// us.(*net.UDPConn).SetReadBuffer(10 * 1024 * 1024)
+		// us.(*net.UDPConn).SetWriteBuffer(10 * 1024 * 1024)
+		return us
 	})
 	cookie := make([]byte, 32)
 	rand.Read(cookie)

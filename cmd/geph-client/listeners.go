@@ -28,6 +28,7 @@ func listenStats() {
 	statsMux.HandleFunc("/kill", handleKill)
 	statsMux.HandleFunc("/", handleStats)
 	statsMux.HandleFunc("/logs", handleLogs)
+	statsMux.HandleFunc("/debugpack", handleDebugPack)
 	statsMux.HandleFunc("/stacktrace", handleStacktrace)
 	err := statsServ.ListenAndServe()
 	if err != nil {
@@ -144,14 +145,14 @@ func listenSocks() {
 					useStats(func(sc *stats) {
 						sc.UpBytes += uint64(n)
 					})
-				})
+				}, time.Hour)
 			}()
 			cwl.CopyWithLimit(cl, remote,
 				downLimit, func(n int) {
 					useStats(func(sc *stats) {
 						sc.DownBytes += uint64(n)
 					})
-				})
+				}, time.Hour)
 		}()
 	}
 }
