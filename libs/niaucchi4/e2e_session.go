@@ -29,7 +29,7 @@ func newRtTracker() *rtTracker {
 func (rtt *rtTracker) add(k uint64, v int) {
 	rtt.tab[k] = v
 	rtt.queue = append(rtt.queue, k)
-	if len(rtt.queue) > 10000 {
+	if len(rtt.queue) > 1000 {
 		oldest := rtt.queue[0]
 		rtt.queue = rtt.queue[1:]
 		delete(rtt.tab, oldest)
@@ -45,15 +45,16 @@ func (rtt *rtTracker) get(k uint64) int {
 }
 
 type e2eSession struct {
-	remote       []net.Addr
-	info         []*e2eLinkInfo
-	sessid       SessionAddr
-	rdqueue      [][]byte
-	dupRateLimit *rate.Limiter
-	lastSend     time.Time
-	lastRemid    int
-	recvDedup    *lru.Cache
-	sendDedup    *rtTracker
+	remote        []net.Addr
+	info          []*e2eLinkInfo
+	sessid        SessionAddr
+	rdqueue       [][]byte
+	dupRateLimit  *rate.Limiter
+	infoRateLimit *rate.Limiter
+	lastSend      time.Time
+	lastRemid     int
+	recvDedup     *lru.Cache
+	sendDedup     *rtTracker
 
 	lock sync.Mutex
 }
@@ -61,10 +62,11 @@ type e2eSession struct {
 func newSession(sessid [16]byte) *e2eSession {
 	cache, _ := lru.New(128)
 	return &e2eSession{
-		dupRateLimit: rate.NewLimiter(3, 100),
-		recvDedup:    cache,
-		sendDedup:    newRtTracker(),
-		sessid:       sessid,
+		dupRateLimit:  rate.NewLimiter(3, 100),
+		infoRateLimit: rate.NewLimiter(10, 100),
+		recvDedup:     cache,
+		sendDedup:     newRtTracker(),
+		sessid:        sessid,
 	}
 }
 
@@ -88,6 +90,9 @@ type e2eLinkInfo struct {
 	lastProbeTime time.Time
 	lastProbeSn   uint64
 	lastPing      int64
+	lastPingTime  time.Time
+
+	lastRecvTime time.Time
 }
 
 func (el *e2eLinkInfo) getScore() float64 {
@@ -103,12 +108,12 @@ func (el *e2eLinkInfo) getScore() float64 {
 			el.checkTime = now
 		}
 	}
-	factor := math.Max(float64(el.lastPing), float64(time.Since(el.lastProbeTime).Milliseconds()))
+	factor := float64(el.lastPing) + math.Max(0, time.Since(el.lastRecvTime).Seconds()*1000-3000)
 	loss := float64(el.rtxCount) / float64(el.txCount+1000)
-	if el.remoteLoss > 0.000001 {
+	if el.remoteLoss > 0.001 {
 		loss = el.remoteLoss
 	}
-	return factor + math.Sqrt(loss)*1000
+	return factor + loss*1000
 	// return el.longLoss
 }
 
@@ -159,7 +164,7 @@ func (es *e2eSession) AddPath(host net.Addr) {
 		log.Printf("N4: [%p] adding new path %v", es, host)
 	}
 	es.remote = append(es.remote, host)
-	es.info = append(es.info, &e2eLinkInfo{lastPing: 10000000})
+	es.info = append(es.info, &e2eLinkInfo{lastPing: 10000000, lastRecvTime: time.Now()})
 }
 
 func (es *e2eSession) processStats(pkt e2ePacket, remid int) {
@@ -218,17 +223,17 @@ func (es *e2eSession) Input(pkt e2ePacket, source net.Addr) {
 		es.processStats(pkt, remid)
 	}
 	nfo := es.info[remid]
-	if nfo.acksn > nfo.lastProbeSn {
-		now := time.Now()
+	now := time.Now()
+	if nfo.acksn > nfo.lastProbeSn && nfo.acksn > 10 {
 		pingSample := now.Sub(nfo.lastProbeTime).Milliseconds()
-		if pingSample < nfo.lastPing {
+		if pingSample < nfo.lastPing || now.Sub(nfo.lastPingTime).Seconds() > 60 {
 			nfo.lastPing = pingSample
-		} else if pingSample < nfo.lastPing*2 { // filter out absurd values
-			nfo.lastPing = 31*nfo.lastPing/32 + pingSample/32
+			nfo.lastPingTime = now
 		}
 		nfo.lastProbeSn = nfo.sendsn
 		nfo.lastProbeTime = now
 	}
+	nfo.lastRecvTime = now
 }
 
 // Send sends a packet. It returns instructions to where the packet should be sent etc
@@ -237,7 +242,7 @@ func (es *e2eSession) Send(payload []byte, sendCallback func(e2ePacket, net.Addr
 	defer es.lock.Unlock()
 	now := time.Now()
 	send := func(rtd bool, remid int) {
-		if len(payload) > 10000 {
+		if len(payload) > 1000 {
 			bodyHash := highwayhash.Sum64(payload[256:], make([]byte, 32))
 			val := es.sendDedup.get(bodyHash)
 			if val >= 0 {
@@ -278,29 +283,36 @@ func (es *e2eSession) Send(payload []byte, sendCallback func(e2ePacket, net.Addr
 	}
 	// find the right destination
 	if es.dupRateLimit.AllowN(time.Now(), len(es.remote)) {
+		//log.Println("sending small payload", len(payload), "to all paths")
 		for remid := range es.remote {
 			send(false, remid)
+		}
+	}
+	if es.infoRateLimit.AllowN(time.Now(), len(es.remote)) || len(payload) < 100 {
+		// heuristic: we send info whenever we send ACK
+		for remid := range es.remote {
+			remid := remid
 			defer sendInfo(remid)
 		}
 	}
 	remid := -1
-	if time.Since(es.lastSend).Seconds() > 1 || true {
-		lowPoint := 1e20
+	if time.Since(es.lastSend).Seconds() > 1 {
+		lowPoint := -1.0
 		for i, li := range es.info {
-			if score := li.getScore(); score < lowPoint {
+			if score := li.getScore(); score < lowPoint || lowPoint < 0 {
 				lowPoint = score
 				remid = i
 			}
 		}
-		// if doLogging {
-		// 	log.Println("N4: selected", es.remote[remid], "with score", es.info[remid].getScore())
-		// 	go func() {
-		// 		for remid, v := range es.DebugInfo() {
-		// 			log.Printf("%v %v %v/%v", v.RemoteIP, v.Ping,
-		// 				es.info[remid].rtxCount, es.info[remid].txCount)
-		// 		}
-		// 	}()
-		// }
+		if doLogging {
+			log.Println("N4: selected", es.remote[remid], "with score", es.info[remid].getScore())
+			go func() {
+				for remid, v := range es.DebugInfo() {
+					log.Printf("%v %v %v/%v", v.RemoteIP, v.Ping,
+						es.info[remid].rtxCount, es.info[remid].txCount)
+				}
+			}()
+		}
 		if remid == -1 {
 			err = errors.New("cannot find any path")
 			return

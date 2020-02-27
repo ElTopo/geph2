@@ -38,6 +38,7 @@ var statClient *statsd.StatsdClient
 var ipcache = cache.New(time.Hour, time.Hour)
 
 func main() {
+
 	log.SetFormatter(&log.TextFormatter{
 		FullTimestamp: false,
 	})
@@ -107,7 +108,7 @@ func main() {
 		if err != nil {
 			continue
 		}
-		rc.SetWindowSize(10000, 1000)
+		rc.SetWindowSize(10000, 10000)
 		rc.SetNoDelay(0, 10, 32, 0)
 		rc.SetStreamMode(true)
 		rc.SetMtu(1300)
@@ -120,6 +121,7 @@ func e2elisten() {
 	if err != nil {
 		panic(err)
 	}
+	//fastsock := fastudp.NewConn(udpsock.(*net.UDPConn))
 	udpsock.(*net.UDPConn).SetWriteBuffer(100 * 1024 * 1024)
 	udpsock.(*net.UDPConn).SetReadBuffer(100 * 1024 * 1024)
 	log.Infoln("e2elisten on UDP 2399")
@@ -131,8 +133,8 @@ func e2elisten() {
 			log.Println("error while accepting E2E:", err)
 			continue
 		}
-		rc.SetWindowSize(10000, 1000)
-		rc.SetNoDelay(0, 10, 32, 0)
+		rc.SetWindowSize(10000, 10000)
+		rc.SetNoDelay(0, 100, 8, 0)
 		rc.SetStreamMode(true)
 		rc.SetMtu(1300)
 		go handle(rc)

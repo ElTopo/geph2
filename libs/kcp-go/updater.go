@@ -2,6 +2,7 @@ package kcp
 
 import (
 	"container/heap"
+	"log"
 	"sync"
 	"time"
 
@@ -100,11 +101,15 @@ func (h *updateHeap) updateTask() {
 			entry := &h.entries[0]
 			now := time.Now()
 			if !now.Before(entry.ts) {
-				// zuru := now.Sub(entry.ts)
-				// if zuru.Milliseconds() > 10 {
-				// 	log.Printf("WARNING!! %p zuru %v", h, zuru)
-				// }
+				zuru := now.Sub(entry.ts)
+				if zuru.Milliseconds() > 20 {
+					log.Printf("WARNING!! %p zuru %v", h, zuru)
+				}
 				interval := entry.s.update()
+				lala := time.Since(now)
+				if lala.Milliseconds() > 5 {
+					log.Printf("WARNING!! %p overtime %v", h, lala)
+				}
 				if interval != 0 {
 					entry.ts = time.Now().Add(interval)
 					heap.Fix(h, 0)
