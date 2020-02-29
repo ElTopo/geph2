@@ -16,7 +16,7 @@ import (
 )
 
 func listenStats() {
-	log.Infoln("STATS on", httpAddr)
+	log.Infoln("STATS on", statsAddr)
 	// spin up stats server
 	statsMux := http.NewServeMux()
 	statsServ := &http.Server{
@@ -124,7 +124,7 @@ func listenSocks() {
 			if bypassHost(host) {
 				remote, err = net.Dial("tcp", rmAddr)
 				if err != nil {
-					log.Println("[%v] failed to bypass %v", len(semaphore), remote)
+					log.Printf("[%v] failed to bypass %v", len(semaphore), remote)
 					tinysocks.CompleteRequestTCP(5, cl)
 					return
 				}
@@ -173,5 +173,5 @@ func listenSocks() {
 
 // TODO bypass local domains
 func bypassHost(str string) bool {
-	return chinalist.IsChinese(str)
+	return bypassChinese && chinalist.IsChinese(str)
 }

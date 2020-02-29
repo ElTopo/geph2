@@ -11,7 +11,6 @@ import (
 	"net/url"
 	"os"
 	"os/user"
-	"runtime"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -94,14 +93,13 @@ restart:
 
 func main() {
 	debug.SetGCPercent(30)
-	runtime.GOMAXPROCS(1)
 	mrand.Seed(time.Now().UnixNano())
 	log.SetFormatter(&log.TextFormatter{
 		FullTimestamp: false,
 		ForceColors:   true,
 	})
 	log.SetLevel(log.DebugLevel)
-	kcp.CongestionControl = "LOL"
+	kcp.CongestionControl = "BIC"
 
 	// configfile path
 	usr, err := user.Current()
@@ -136,6 +134,10 @@ func main() {
 	flag.BoolVar(&noFEC, "noFEC", false, "disable automatic FEC")
 	flag.BoolVar(&bypassChinese, "bypassChinese", false, "bypass proxy for Chinese domains")
 	iniflags.Parse()
+	if dnsAddr != "" {
+		go doDNS()
+	}
+	go listenStats()
 	if GitVersion == "" {
 		GitVersion = "NOVER"
 	}
@@ -155,11 +157,6 @@ func main() {
 			})
 		}
 	}()
-
-	if dnsAddr != "" {
-		go doDNS()
-	}
-	go listenStats()
 
 	log.Println("GephNG version", GitVersion)
 	log.Println("OS: ", runtime.GOOS)
@@ -210,7 +207,7 @@ func main() {
 				log.Println("cannot get country, conservatively using bridges", err)
 			} else {
 				log.Println("country is", country.Country)
-				if country.Country == "CN" || country.Country == "" {
+				if country.Country == "CN" {
 					log.Println("in CHINA, must use bridges")
 				} else {
 					log.Println("disabling bridges")
