@@ -7,18 +7,20 @@ LDFLAGS = -ldflags "-X main.GitVersion=$(GITBRANCH)-$(GITREVISION)$(GITDIRTY)"
 GOBUILD = $(GO) build $(GOBUILDFLAG) $(LDFLAGS)
 GOFMT = gofmt
 
+ALL_GO_FILES= $(shell find . -type f -name '*.go')
+
 all: geph-client geph-bridge geph-binder geph-exit
 
-geph-client: $(wildcard ./cmd/geph-client/*.go)
+geph-client: $(ALL_GO_FILES)
 	$(GOBUILD) -o $@ ./cmd/geph-client/
 
-geph-bridge: $(wildcard ./cmd/geph-bridge/*.go)
+geph-bridge: $(ALL_GO_FILES)
 	-$(GOBUILD) -o $@ ./cmd/geph-bridge/
 
-geph-binder: $(wildcard ./cmd/geph-binder/*.go)
+geph-binder: $(ALL_GO_FILES)
 	-$(GOBUILD) -o $@ ./cmd/geph-binder/
 
-geph-exit: $(wildcard ./cmd/geph-exit/*.go)
+geph-exit: $(ALL_GO_FILES)
 	-$(GOBUILD) -o $@ ./cmd/geph-exit/
 
 # other tools
