@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io/ioutil"
 	"net"
 	"net/http"
@@ -94,7 +95,6 @@ func listenSocks() {
 		go func() {
 			defer cl.Close()
 			cl.(*net.TCPConn).SetKeepAlive(false)
-			cl.(*net.TCPConn).SetReadBuffer(16384)
 			select {
 			case semaphore <- true:
 				defer func() {
@@ -137,8 +137,11 @@ func listenSocks() {
 					return
 				}
 				defer remote.Close()
+				key := fmt.Sprintf("%v//%v", remote.RemoteAddr(), remote.LocalAddr())
+				incrCounter(key)
+				defer decrCounter(key)
 				ping := time.Since(start)
-				log.Debugf("[%v] opened %v in %v", len(semaphore), rmAddr, ping)
+				log.Debugf("[%v] opened %v in %vms through %v", len(semaphore), rmAddr, ping.Milliseconds(), remote.RemoteAddr())
 				useStats(func(sc *stats) {
 					pmil := ping.Milliseconds()
 					if time.Since(sc.PingTime).Seconds() > 30 || uint64(pmil) < sc.MinPing {
