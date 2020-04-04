@@ -11,6 +11,9 @@ ALL_GO_FILES= $(shell find . -type f -name '*.go')
 
 all: geph-client geph-bridge geph-binder geph-exit
 
+client: geph-client
+server: geph-bridge geph-binder geph-exit
+
 geph-client: $(ALL_GO_FILES)
 	$(GOBUILD) -o $@ ./cmd/geph-client/
 
