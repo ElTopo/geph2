@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"math/rand"
 	mrand "math/rand"
 	"net"
 	"net/http"
@@ -52,42 +53,28 @@ var upstreamProxy string
 var additionalBridges string
 var forceWarpfront bool
 
-var bindClient *bdclient.Client
-
-var sWrap commandDialer
+var sWrap *multipool
 
 // GitVersion is the build version
 var GitVersion string
 
+var binders []*bdclient.Client
+
+func getBindClient() *bdclient.Client {
+	return binders[rand.Int()%len(binders)]
+}
+
 // find the fastest binder and stick to it
 func binderRace() {
-	log.Debug("starting binder race...")
-restart:
 	fronts := strings.Split(binderFront, ",")
 	hosts := strings.Split(binderHost, ",")
 	if len(fronts) != len(hosts) {
 		panic("binderFront and binderHost must be of identical length")
 	}
-	winner := make(chan int, 1000)
 	for i := 0; i < len(fronts); i++ {
 		i := i
-		bdc := bdclient.NewClient(fronts[i], hosts[i])
-		go func() {
-			_, err := bdc.GetClientInfo()
-			if err != nil {
-				log.Warnf("[%v %v] failed: %v", fronts[i], hosts[i], err)
-				return
-			}
-			winner <- i
-		}()
-	}
-	select {
-	case i := <-winner:
-		log.Debugf("[%v %v] won binder race", fronts[i], hosts[i])
-		binderFront = fronts[i]
-		binderHost = hosts[i]
-	case <-time.After(time.Second * 20):
-		goto restart
+		bdc := bdclient.NewClient(fronts[i], hosts[i], fmt.Sprintf("geph_client/%v", GitVersion))
+		binders = append(binders, bdc)
 	}
 }
 
@@ -158,6 +145,7 @@ func main() {
 			})
 		}
 	}()
+	binderRace()
 
 	log.Println("GephNG version", GitVersion)
 	log.Println("OS: ", runtime.GOOS)
@@ -171,7 +159,6 @@ func main() {
 		}()
 	}
 	if singleHop == "" {
-		binderRace()
 		if binderProxy != "" {
 			log.Println("binderProxy mode on", binderProxy)
 			binderURL, err := url.Parse(binderFront)
@@ -200,13 +187,12 @@ func main() {
 		}
 
 		// connect to bridge
-		bindClient = bdclient.NewClient(binderFront, binderHost)
 		// automatically pick mode
 		if upstreamProxy != "" {
 			log.Println("upstream proxy enabled, no bridges")
 			direct = true
 		} else if !forceBridges {
-			country, err := bindClient.GetClientInfo()
+			country, err := getBindClient().GetClientInfo()
 			if err != nil {
 				log.Println("cannot get country, conservatively using bridges", err)
 			} else {
