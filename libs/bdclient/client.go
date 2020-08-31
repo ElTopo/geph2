@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -21,19 +22,22 @@ type Client struct {
 	hclient     *http.Client
 	frontDomain string
 	realDomain  string
+	useragent   string
 }
 
 // NewClient creates a new domain-fronting binder client with the given frontDomain and realDomain. frontDomain should start with `https://`.
-func NewClient(frontDomain, realDomain string) *Client {
+func NewClient(frontDomain, realDomain, useragent string) *Client {
 	return &Client{
 		hclient: &http.Client{
 			Transport: &http.Transport{
-				Proxy: nil,
+				Proxy:           nil,
+				IdleConnTimeout: time.Second,
 			},
-			Timeout: time.Second * 60,
+			Timeout: time.Second * 15,
 		},
 		frontDomain: frontDomain,
 		realDomain:  realDomain,
+		useragent:   useragent,
 	}
 }
 
@@ -51,6 +55,7 @@ type ClientInfo struct {
 func (cl *Client) GetClientInfo() (ui ClientInfo, err error) {
 	req, _ := http.NewRequest("GET", fmt.Sprintf("%v/client-info", cl.frontDomain), bytes.NewReader(nil))
 	req.Host = cl.realDomain
+	req.Header.Set("user-agent", cl.useragent)
 	resp, err := cl.hclient.Do(req)
 	if err != nil {
 		return
@@ -63,9 +68,27 @@ func (cl *Client) GetClientInfo() (ui ClientInfo, err error) {
 	return
 }
 
+// GetWarpfronts gets warpfront bridges
+func (cl *Client) GetWarpfronts() (host2front map[string]string, err error) {
+	req, _ := http.NewRequest("GET", fmt.Sprintf("%v/warpfronts", cl.frontDomain), bytes.NewReader(nil))
+	req.Host = cl.realDomain
+	req.Header.Set("user-agent", cl.useragent)
+	resp, err := cl.hclient.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		err = badStatusCode(resp.StatusCode)
+	}
+	err = json.NewDecoder(resp.Body).Decode(&host2front)
+	return
+}
+
 // AddBridge uploads some bridge info.
 func (cl *Client) AddBridge(secret string, cookie []byte, host string, allocGroup string) (err error) {
 	req, _ := http.NewRequest("GET", fmt.Sprintf("%v/add-bridge?cookie=%x&host=%v&allocGroup=%v", cl.frontDomain, cookie, host, allocGroup), bytes.NewReader(nil))
+	req.Header.Set("user-agent", cl.useragent)
 	req.Host = cl.realDomain
 	req.SetBasicAuth("user", secret)
 	resp, err := cl.hclient.Do(req)
@@ -84,6 +107,7 @@ func (cl *Client) AddBridge(secret string, cookie []byte, host string, allocGrou
 func (cl *Client) GetTicketKey(tier string) (tkey *rsa.PublicKey, err error) {
 	req, _ := http.NewRequest("GET", fmt.Sprintf("%v/get-ticket-key?tier=%v", cl.frontDomain, tier), bytes.NewReader(nil))
 	req.Host = cl.realDomain
+	req.Header.Set("user-agent", cl.useragent)
 	resp, err := cl.hclient.Do(req)
 	if err != nil {
 		return
@@ -112,6 +136,7 @@ func (cl *Client) GetTier(username, password string) (tier string, err error) {
 	v.Set("pwd", password)
 	req, _ := http.NewRequest("GET", fmt.Sprintf("%v/get-tier?%v", cl.frontDomain, v.Encode()), bytes.NewReader(nil))
 	req.Host = cl.realDomain
+	req.Header.Set("user-agent", cl.useragent)
 	resp, err := cl.hclient.Do(req)
 	if err != nil {
 		return
@@ -138,6 +163,9 @@ type PaymentTx struct {
 	Date   time.Time
 	Amount int
 }
+
+// ErrBadAuth indicates incorrect credentials
+var ErrBadAuth = errors.New("access denied")
 
 // GetTicket obtains an authentication ticket.
 func (cl *Client) GetTicket(username, password string) (ubmsg, ubsig []byte, details TicketResp, err error) {
@@ -175,11 +203,16 @@ func (cl *Client) GetTicket(username, password string) (ubmsg, ubsig []byte, det
 	v.Set("blinded", base64.RawStdEncoding.EncodeToString(blinded))
 	req, _ := http.NewRequest("GET", fmt.Sprintf("%v/get-ticket?%v", cl.frontDomain, v.Encode()), bytes.NewReader(nil))
 	req.Host = cl.realDomain
+	req.Header.Set("user-agent", cl.useragent)
 	resp, err := cl.hclient.Do(req)
 	if err != nil {
 		return
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusForbidden {
+		err = ErrBadAuth
+		return
+	}
 	var respDec TicketResp
 	err = json.NewDecoder(resp.Body).Decode(&respDec)
 	if err != nil {
@@ -203,6 +236,7 @@ type BridgeInfo struct {
 func (cl *Client) GetBridges(ubmsg, ubsig []byte) (bridges []BridgeInfo, err error) {
 	req, _ := http.NewRequest("GET", fmt.Sprintf("%v/get-bridges", cl.frontDomain), bytes.NewReader(nil))
 	req.Host = cl.realDomain
+	req.Header.Set("user-agent", cl.useragent)
 	resp, err := cl.hclient.Do(req)
 	if err != nil {
 		return
@@ -220,6 +254,7 @@ func (cl *Client) GetBridges(ubmsg, ubsig []byte) (bridges []BridgeInfo, err err
 func (cl *Client) GetEphBridges(ubmsg []byte, ubsig []byte, exit string) (bridges []BridgeInfo, err error) {
 	req, _ := http.NewRequest("GET", fmt.Sprintf("%v/get-bridges?type=ephemeral&exit=%v", cl.frontDomain, exit), bytes.NewReader(nil))
 	req.Host = cl.realDomain
+	req.Header.Set("user-agent", cl.useragent)
 	resp, err := cl.hclient.Do(req)
 	if err != nil {
 		return
@@ -243,6 +278,7 @@ func (cl *Client) RedeemTicket(tier string, ubmsg, ubsig []byte) (err error) {
 	req, _ := http.NewRequest("GET", fmt.Sprintf("%v/redeem-ticket?%v", cl.frontDomain, v.Encode()), bytes.NewReader(nil))
 	req.Host = cl.realDomain
 	resp, err := cl.hclient.Do(req)
+	req.Header.Set("user-agent", cl.useragent)
 	if err != nil {
 		return
 	}

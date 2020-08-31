@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"log"
@@ -67,7 +68,7 @@ func e2enat(dest string, cookie []byte) (port int, err error) {
 		return
 	}
 	leftRaw = fastudp.NewConn(leftRaw.(*net.UDPConn))
-	leftSock := niaucchi4.ObfsListen(cookie, leftRaw)
+	leftSock := niaucchi4.ObfsListen(cookie, leftRaw, true)
 	rightSock, err := net.ListenPacket("udp", "")
 	if err != nil {
 		return
@@ -86,7 +87,7 @@ func e2enat(dest string, cookie []byte) (port int, err error) {
 		defer rightSock.Close()
 		bts := malloc(2048)
 		for {
-			dl := time.Now().Add(time.Hour * 2)
+			dl := time.Now().Add(time.Minute * 30)
 			leftSock.SetReadDeadline(dl)
 			n, addr, err := leftSock.ReadFrom(bts)
 			if err != nil {
@@ -114,7 +115,7 @@ func e2enat(dest string, cookie []byte) (port int, err error) {
 		defer rightSock.Close()
 		bts := malloc(2048)
 		for {
-			dl := time.Now().Add(time.Hour * 2)
+			dl := time.Now().Add(time.Minute * 30)
 			rightSock.SetReadDeadline(dl)
 			n, _, e := rightSock.ReadFrom(bts)
 			if e != nil {
@@ -128,20 +129,19 @@ func e2enat(dest string, cookie []byte) (port int, err error) {
 				copy(btsCopy, bts)
 				start := time.Now()
 				maybeDoJob(func() {
-					if limiter.AllowN(time.Now(), n) {
-						_, e = leftSock.WriteTo(btsCopy, addri.(net.Addr))
-						if err != nil {
-							log.Println("cannot write:", err)
+					limiter.WaitN(context.Background(), n)
+					_, e = leftSock.WriteTo(btsCopy, addri.(net.Addr))
+					if err != nil {
+						log.Println("cannot write:", err)
+					}
+					free(btsCopy)
+					if statClient != nil {
+						inducedLatency := time.Since(start)
+						if rand.Int()%100000 < n {
+							statClient.Increment(allocGroup + ".e2edown")
 						}
-						free(btsCopy)
-						if statClient != nil {
-							inducedLatency := time.Since(start)
-							if rand.Int()%100000 < n {
-								statClient.Increment(allocGroup + ".e2edown")
-							}
-							if queueReportLimiter.Allow() {
-								statClient.Timing(allocGroup+".queuens", inducedLatency.Nanoseconds())
-							}
+						if queueReportLimiter.Allow() {
+							statClient.Timing(allocGroup+".queuens", inducedLatency.Nanoseconds())
 						}
 					}
 				})

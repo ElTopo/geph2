@@ -1,7 +1,6 @@
 package main
 
 import (
-	"log"
 	"runtime"
 	"sync"
 )
@@ -20,8 +19,8 @@ func free(bts []byte) {
 	bufPool.Put(bts[:2048])
 }
 
-// ~ 1.4 MB buffer. This gives us ample buffer space to deal with CPU spikes and avoid packet loss.
-var e2ejobs = make(chan func(), 1024*1024)
+// This gives us ample buffer space to deal with CPU spikes and avoid packet loss.
+var e2ejobs = make(chan func(), 1000)
 
 func maybeDoJob(f func()) {
 	select {
@@ -33,13 +32,9 @@ func maybeDoJob(f func()) {
 
 func init() {
 	for i := 0; i < runtime.GOMAXPROCS(0); i++ {
-		workerID := i
-		log.Println("spawning worker thread", workerID)
+		//log.Println("spawning worker thread", workerID)
 		go func() {
 			for i := 0; ; i++ {
-				if i%1000 == 0 {
-					log.Println("worker", workerID, "forwarded", i, "packets")
-				}
 				(<-e2ejobs)()
 			}
 		}()

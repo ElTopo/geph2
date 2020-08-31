@@ -19,6 +19,7 @@ func init() {
 }
 
 func handleClientInfo(w http.ResponseWriter, r *http.Request) {
+	countUserAgent(r)
 	var cinfo struct {
 		Address string
 		Country string
@@ -30,5 +31,8 @@ func handleClientInfo(w http.ResponseWriter, r *http.Request) {
 
 	country, _ := db.GetCountry(addr)
 	cinfo.Country = country
+	// if cinfo.Country == "IR" {
+	// 	cinfo.Country = "CN" // HACK to put iranian users on bridges
+	// }
 	json.NewEncoder(w).Encode(cinfo)
 }

@@ -9,13 +9,14 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/elazarl/goproxy"
+	"github.com/geph-official/geph2/cmd/geph-client/chinalist"
 	"github.com/geph-official/geph2/libs/cwl"
 	"github.com/geph-official/geph2/libs/tinysocks"
 	"golang.org/x/time/rate"
 )
 
 func listenStats() {
-	log.Infoln("STATS on", httpAddr)
+	log.Infoln("STATS on", statsAddr)
 	// spin up stats server
 	statsMux := http.NewServeMux()
 	statsServ := &http.Server{
@@ -28,6 +29,7 @@ func listenStats() {
 	statsMux.HandleFunc("/kill", handleKill)
 	statsMux.HandleFunc("/", handleStats)
 	statsMux.HandleFunc("/logs", handleLogs)
+	statsMux.HandleFunc("/debugpack", handleDebugPack)
 	statsMux.HandleFunc("/stacktrace", handleStacktrace)
 	err := statsServ.ListenAndServe()
 	if err != nil {
@@ -92,7 +94,6 @@ func listenSocks() {
 		go func() {
 			defer cl.Close()
 			cl.(*net.TCPConn).SetKeepAlive(false)
-			cl.(*net.TCPConn).SetReadBuffer(16384)
 			select {
 			case semaphore <- true:
 				defer func() {
@@ -114,27 +115,43 @@ func listenSocks() {
 			rmAddr := rmAddrProt.String()
 			host, port, err := net.SplitHostPort(rmAddr)
 			if realName := fakeIPToName(host); realName != "" {
-				log.Debugf("[%v] mapped fake IP %v => %v", len(semaphore), host, realName)
 				rmAddr = net.JoinHostPort(realName, port)
+				host = realName
 			}
-			start := time.Now()
-			remote, ok := sWrap.DialCmd("proxy", rmAddr)
-			if !ok {
-				return
-			}
-			defer remote.Close()
-			ping := time.Since(start)
-			log.Debugf("[%v] opened %v in %v", len(semaphore), rmAddr, ping)
-			useStats(func(sc *stats) {
-				pmil := ping.Milliseconds()
-				if time.Since(sc.PingTime).Seconds() > 30 || uint64(pmil) < sc.MinPing {
-					sc.MinPing = uint64(pmil)
-					sc.PingTime = time.Now()
+			var remote net.Conn
+			var ok bool
+			if bypassHost(host) {
+				remote, err = net.Dial("tcp", rmAddr)
+				if err != nil {
+					log.Printf("[%v] failed to bypass %v", len(semaphore), remote)
+					tinysocks.CompleteRequestTCP(5, cl)
+					return
 				}
-			})
-			if !ok {
-				tinysocks.CompleteRequestTCP(5, cl)
-				return
+				log.Debugf("[%v] BYPASSED %v", len(semaphore), rmAddr)
+				remote.(*net.TCPConn).SetKeepAlive(false) // app responsibility
+			} else {
+				start := time.Now()
+				var key interface{}
+				remote, key, ok = sWrap.DialCmd("proxy", rmAddr)
+				if !ok {
+					return
+				}
+				defer remote.Close()
+				incrCounter(key)
+				defer decrCounter(key)
+				ping := time.Since(start)
+				log.Debugf("[%v] opened %v in %vms through %v", len(semaphore), rmAddr, ping.Milliseconds(), remote.RemoteAddr())
+				useStats(func(sc *stats) {
+					pmil := ping.Milliseconds()
+					if time.Since(sc.PingTime).Seconds() > 30 || uint64(pmil) < sc.MinPing {
+						sc.MinPing = uint64(pmil)
+						sc.PingTime = time.Now()
+					}
+				})
+				if !ok {
+					tinysocks.CompleteRequestTCP(5, cl)
+					return
+				}
 			}
 			tinysocks.CompleteRequestTCP(0, cl)
 			go func() {
@@ -144,14 +161,19 @@ func listenSocks() {
 					useStats(func(sc *stats) {
 						sc.UpBytes += uint64(n)
 					})
-				})
+				}, time.Hour)
 			}()
 			cwl.CopyWithLimit(cl, remote,
 				downLimit, func(n int) {
 					useStats(func(sc *stats) {
 						sc.DownBytes += uint64(n)
 					})
-				})
+				}, time.Hour)
 		}()
 	}
+}
+
+// TODO bypass local domains
+func bypassHost(str string) bool {
+	return bypassChinese && chinalist.IsChinese(str)
 }

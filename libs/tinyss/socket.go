@@ -1,6 +1,7 @@
 package tinyss
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/cipher"
 	"crypto/hmac"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/geph-official/geph2/libs/c25519"
+	pool "github.com/libp2p/go-buffer-pool"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/curve25519"
 )
@@ -25,8 +27,9 @@ type Socket struct {
 	txctr   uint64
 	txcrypt cipher.AEAD
 
-	plain     net.Conn
-	sharedsec []byte
+	plain         net.Conn
+	plainBuffered *bufio.Reader
+	sharedsec     []byte
 
 	nextprot byte
 }
@@ -66,10 +69,11 @@ func newSocket(plain net.Conn, repk, lesk [32]byte) (sok *Socket) {
 	}
 	// create socket
 	sok = &Socket{
-		rxcrypt:   aead(rxkey),
-		txcrypt:   aead(txkey),
-		plain:     plain,
-		sharedsec: sharedsec[:],
+		rxcrypt:       aead(rxkey),
+		txcrypt:       aead(txkey),
+		plain:         plain,
+		sharedsec:     sharedsec[:],
+		plainBuffered: bufio.NewReader(plain),
 	}
 
 	return
@@ -94,23 +98,29 @@ func (sk *Socket) Read(p []byte) (n int, err error) {
 		return
 	}
 	// otherwise wait for record
-	lenbts := make([]byte, 2)
-	_, err = io.ReadFull(sk.plain, lenbts)
+	lenbts := pool.GlobalPool.Get(2)
+	defer pool.GlobalPool.Put(lenbts)
+	_, err = io.ReadFull(sk.plainBuffered, lenbts)
 	if err != nil {
 		sk.rxerr = err
 		return
 	}
-	ciph := make([]byte, binary.BigEndian.Uint16(lenbts))
-	_, err = io.ReadFull(sk.plain, ciph)
+	ciph := pool.GlobalPool.Get(int(binary.BigEndian.Uint16(lenbts)))
+	defer pool.GlobalPool.Put(ciph)
+	_, err = io.ReadFull(sk.plainBuffered, ciph)
 	if err != nil {
 		sk.rxerr = err
 		return
 	}
 	// decrypt the ciphertext
-	nonce := make([]byte, sk.rxcrypt.NonceSize())
+	nonce := pool.GlobalPool.Get(sk.rxcrypt.NonceSize())
+	for i := range nonce {
+		nonce[i] = 0
+	}
+	defer pool.GlobalPool.Put(nonce)
 	binary.BigEndian.PutUint64(nonce, sk.rxctr)
 	sk.rxctr++
-	data, err := sk.rxcrypt.Open(nil, nonce, ciph, nil)
+	data, err := sk.rxcrypt.Open(ciph[:0], nonce, ciph, nil)
 	if err != nil {
 		sk.rxerr = err
 		return
@@ -141,13 +151,17 @@ func (sk *Socket) Write(p []byte) (n int, err error) {
 		return
 	}
 	// main work here
-	nonce := make([]byte, sk.txcrypt.NonceSize())
+	backing := pool.GlobalPool.Get(sk.txcrypt.Overhead() + 2 + len(p))
+	nonce := pool.GlobalPool.Get(sk.txcrypt.NonceSize())
+	defer pool.GlobalPool.Put(nonce)
+	for i := range nonce {
+		nonce[i] = 0
+	}
 	binary.BigEndian.PutUint64(nonce, sk.txctr)
 	sk.txctr++
-	ciph := sk.txcrypt.Seal(nil, nonce, p, nil)
-	lenbts := make([]byte, 2)
-	binary.BigEndian.PutUint16(lenbts, uint16(len(ciph)))
-	_, err = sk.plain.Write(append(lenbts, ciph...))
+	ciph := sk.txcrypt.Seal(backing[2:][:0], nonce, p, nil)
+	binary.BigEndian.PutUint16(backing[:2], uint16(len(ciph)))
+	_, err = sk.plain.Write(backing)
 	n = len(p)
 	return
 }

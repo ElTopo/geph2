@@ -29,7 +29,7 @@ func newRtTracker() *rtTracker {
 func (rtt *rtTracker) add(k uint64, v int) {
 	rtt.tab[k] = v
 	rtt.queue = append(rtt.queue, k)
-	if len(rtt.queue) > 10000 {
+	if len(rtt.queue) > 1000 {
 		oldest := rtt.queue[0]
 		rtt.queue = rtt.queue[1:]
 		delete(rtt.tab, oldest)
@@ -55,18 +55,20 @@ type e2eSession struct {
 	lastRemid     int
 	recvDedup     *lru.Cache
 	sendDedup     *rtTracker
+	sendCallback  func(e2ePacket, net.Addr)
 
 	lock sync.Mutex
 }
 
-func newSession(sessid [16]byte) *e2eSession {
+func newSession(sessid [16]byte, sendCallback func(e2ePacket, net.Addr)) *e2eSession {
 	cache, _ := lru.New(128)
 	return &e2eSession{
-		dupRateLimit:  rate.NewLimiter(3, 100),
-		infoRateLimit: rate.NewLimiter(10, 100),
+		dupRateLimit:  rate.NewLimiter(10, 100),
+		infoRateLimit: rate.NewLimiter(30, 100),
 		recvDedup:     cache,
 		sendDedup:     newRtTracker(),
 		sessid:        sessid,
+		sendCallback:  sendCallback,
 	}
 }
 
@@ -90,6 +92,9 @@ type e2eLinkInfo struct {
 	lastProbeTime time.Time
 	lastProbeSn   uint64
 	lastPing      int64
+	lastPingTime  time.Time
+
+	lastRecvTime time.Time
 }
 
 func (el *e2eLinkInfo) getScore() float64 {
@@ -105,16 +110,15 @@ func (el *e2eLinkInfo) getScore() float64 {
 			el.checkTime = now
 		}
 	}
-	isProbing := el.sendsn > el.lastProbeSn
-	factor := float64(el.lastPing)
-	if isProbing {
-		factor = math.Max(float64(el.lastPing), float64(time.Since(el.lastProbeTime).Milliseconds()))
-	}
-	loss := float64(el.rtxCount) / float64(el.txCount+1000)
-	if el.remoteLoss > 0.001 {
+	pseudoPing := float64(el.lastPing) + math.Max(0, time.Since(el.lastRecvTime).Seconds()*1000-3000)
+	loss := float64(el.rtxCount) / (float64(el.txCount) + 1)
+	if el.remoteLoss >= 0 {
 		loss = el.remoteLoss
 	}
-	return factor + loss*1000
+	if loss > 1 {
+		loss = 1
+	}
+	return pseudoPing * (1 / (1.01 - math.Min(1, loss))) // intuition: expected retransmissions needed
 	// return el.longLoss
 }
 
@@ -165,20 +169,38 @@ func (es *e2eSession) AddPath(host net.Addr) {
 		log.Printf("N4: [%p] adding new path %v", es, host)
 	}
 	es.remote = append(es.remote, host)
-	es.info = append(es.info, &e2eLinkInfo{lastPing: 10000000})
+	es.info = append(es.info, &e2eLinkInfo{lastPing: 10000000, lastRecvTime: time.Now(), remoteLoss: -1})
 }
 
 func (es *e2eSession) processStats(pkt e2ePacket, remid int) {
 	recvd := binary.LittleEndian.Uint32(pkt.Body[:4])
 	total := binary.LittleEndian.Uint32(pkt.Body[4:])
 	loss := 1 - float64(recvd)/(float64(total)+1)
-	es.info[remid].remoteLoss = loss
+	rid := es.info[remid]
+	if rid.remoteLoss < 0 || (loss < rid.remoteLoss && total > 50) {
+		rid.remoteLoss = loss
+	} else {
+		rid.remoteLoss = 0.9*rid.remoteLoss + 0.1*loss
+	}
 }
 
 // Input processes a packet through the e2e session state.
 func (es *e2eSession) Input(pkt e2ePacket, source net.Addr) {
 	es.lock.Lock()
 	defer es.lock.Unlock()
+	sendInfo := func(remid int) {
+		now := time.Now()
+		nfo := es.info[remid]
+		if nfo.recvsnRecent > 1000 && now.Sub(nfo.checkTime).Seconds() > 5 {
+			nfo.recvsnRecent /= 2
+			nfo.recvcntRecent /= 2
+			nfo.checkTime = now
+		}
+		buf := make([]byte, 8)
+		binary.LittleEndian.PutUint32(buf[4:], nfo.recvsnRecent)
+		binary.LittleEndian.PutUint32(buf[:4], nfo.recvcntRecent)
+		es.rawSend(false, remid, buf)
+	}
 	if pkt.Session != es.sessid {
 		log.Println("pkt.Session =", pkt.Session, "; es.sessid =", es.sessid)
 		panic("wrong sessid passed to Input")
@@ -224,83 +246,68 @@ func (es *e2eSession) Input(pkt e2ePacket, source net.Addr) {
 		es.processStats(pkt, remid)
 	}
 	nfo := es.info[remid]
-	if nfo.acksn > nfo.lastProbeSn {
-		now := time.Now()
+	now := time.Now()
+	if nfo.acksn > nfo.lastProbeSn && nfo.acksn > 10 {
 		pingSample := now.Sub(nfo.lastProbeTime).Milliseconds()
-		if pingSample < nfo.lastPing {
+		if pingSample < nfo.lastPing || now.Sub(nfo.lastPingTime).Seconds() > 60 {
 			nfo.lastPing = pingSample
-		} else if pingSample < nfo.lastPing*2 { // filter out absurd values
-			nfo.lastPing = 31*nfo.lastPing/32 + pingSample/32
+			nfo.lastPingTime = now
 		}
 		nfo.lastProbeSn = nfo.sendsn
 		nfo.lastProbeTime = now
 	}
+	nfo.lastRecvTime = now
+
+	if es.infoRateLimit.Allow() {
+		sendInfo(remid)
+	}
+}
+
+func (es *e2eSession) rawSend(rtd bool, remid int, payload []byte) {
+	now := time.Now()
+	if len(payload) > 1000 {
+		bodyHash := highwayhash.Sum64(payload[256:], make([]byte, 32))
+		val := es.sendDedup.get(bodyHash)
+		if val >= 0 {
+			//devalFactor := math.Pow(0.9, now.Sub(es.info[val].lastSendTime).Seconds())
+			es.info[val].rtxCount++
+			es.info[val].lastSendTime = now
+		} else {
+			//devalFactor := math.Pow(0.9, now.Sub(es.info[remid].lastSendTime).Seconds())
+			es.sendDedup.add(bodyHash, remid)
+			es.info[remid].txCount++
+			es.info[remid].lastSendTime = now
+		}
+	}
+	// create pkt
+	toSend := e2ePacket{
+		Session: es.sessid,
+		Sn:      es.info[remid].sendsn,
+		Ack:     es.info[remid].recvsn + 1,
+		Body:    payload,
+	}
+	es.info[remid].sendsn++
+	dest := es.remote[remid]
+	es.sendCallback(toSend, dest)
 }
 
 // Send sends a packet. It returns instructions to where the packet should be sent etc
-func (es *e2eSession) Send(payload []byte, sendCallback func(e2ePacket, net.Addr)) (err error) {
+func (es *e2eSession) Send(payload []byte) (err error) {
 	es.lock.Lock()
 	defer es.lock.Unlock()
 	now := time.Now()
-	send := func(rtd bool, remid int) {
-		if len(payload) > 1000 {
-			bodyHash := highwayhash.Sum64(payload[256:], make([]byte, 32))
-			val := es.sendDedup.get(bodyHash)
-			if val >= 0 {
-				//devalFactor := math.Pow(0.9, now.Sub(es.info[val].lastSendTime).Seconds())
-				es.info[val].rtxCount++
-				es.info[val].lastSendTime = now
-			} else {
-				//devalFactor := math.Pow(0.9, now.Sub(es.info[remid].lastSendTime).Seconds())
-				es.sendDedup.add(bodyHash, remid)
-				es.info[remid].txCount++
-				es.info[remid].lastSendTime = now
-			}
-		}
-		// create pkt
-		toSend := e2ePacket{
-			Session: es.sessid,
-			Sn:      es.info[remid].sendsn,
-			Ack:     es.info[remid].recvsn + 1,
-			Body:    payload,
-		}
-		es.info[remid].sendsn++
-		dest := es.remote[remid]
-		sendCallback(toSend, dest)
-	}
-	sendInfo := func(remid int) {
-		nfo := es.info[remid]
-		if nfo.recvsnRecent > 1000 && now.Sub(nfo.checkTime).Seconds() > 5 {
-			nfo.recvsnRecent /= 2
-			nfo.recvcntRecent /= 2
-			nfo.checkTime = now
-		}
-		buf := make([]byte, 8)
-		binary.LittleEndian.PutUint32(buf[4:], nfo.recvsnRecent)
-		binary.LittleEndian.PutUint32(buf[:4], nfo.recvcntRecent)
-		//log.Println("sending feedback", es.remote[remid], nfo.recvsnRecent, nfo.recvcntRecent)
-		payload = buf
-		send(false, remid)
-	}
 	// find the right destination
 	if es.dupRateLimit.AllowN(time.Now(), len(es.remote)) {
 		//log.Println("sending small payload", len(payload), "to all paths")
 		for remid := range es.remote {
-			send(false, remid)
-		}
-	}
-	if es.infoRateLimit.AllowN(time.Now(), len(es.remote)) || len(payload) < 100 {
-		// heuristic: we send info whenever we send ACK
-		for remid := range es.remote {
-			remid := remid
-			defer sendInfo(remid)
+			es.rawSend(false, remid, payload)
 		}
 	}
 	remid := -1
-	if time.Since(es.lastSend).Seconds() > 1 {
-		lowPoint := 1e20
+	if time.Since(es.lastSend).Seconds() > 0.1 {
+		lowPoint := -1.0
 		for i, li := range es.info {
-			if score := li.getScore(); score < lowPoint {
+			if score := li.getScore(); score < lowPoint || lowPoint < 0 {
 				lowPoint = score
 				remid = i
 			}
@@ -323,7 +330,7 @@ func (es *e2eSession) Send(payload []byte, sendCallback func(e2ePacket, net.Addr
 		remid = es.lastRemid
 	}
 	es.lastRemid = remid
-	send(true, remid)
+	es.rawSend(true, remid, payload)
 	return
 }
 

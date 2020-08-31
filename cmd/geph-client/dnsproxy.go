@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -88,6 +89,11 @@ func doDNSFaker() {
 					A: ip.IP,
 				})
 				w.WriteMsg(m)
+			} else if q.Qtype == dns.TypeAAAA {
+				// we claim that we don't have AAAA records
+				m := new(dns.Msg)
+				m.SetReply(r)
+				w.WriteMsg(m)
 			}
 			dns.HandleFailed(w, r)
 		}),
@@ -124,7 +130,8 @@ func nameToFakeIP(name string) string {
 	for fakeIPCache.revmap[retval] != "" {
 		retval = genFakeIP()
 	}
-	fakeIPCache.revmap[retval] = name
+	log.Debugf("mapped fake IP %v => %v", retval, name)
+	fakeIPCache.revmap[retval] = strings.Trim(name, ".")
 	fakeIPCache.mapping[name] = retval
 	return retval
 }

@@ -4,19 +4,16 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"math/rand"
 	mrand "math/rand"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
-	"os/signal"
 	"os/user"
-	"runtime"
 	"runtime/debug"
-	"runtime/pprof"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/vharitonsky/iniflags"
@@ -48,56 +45,47 @@ var httpAddr string
 var statsAddr string
 var dnsAddr string
 var fakeDNS bool
-
-var useTCP bool
-var noFEC bool
+var bypassChinese bool
 
 var singleHop string
+var upstreamProxy string
+var additionalBridges string
+var forceWarpfront bool
 
-var bindClient *bdclient.Client
-
-var cpuprofile = flag.String("cpuprofile", "", "write cpu profile to `file`")
-
-var sWrap *muxWrap
+var sWrap *multipool
 
 // GitVersion is the build version
 var GitVersion string
 
+var binders []*bdclient.Client
+
+func getBindClient() *bdclient.Client {
+	return binders[rand.Int()%len(binders)]
+}
+
+func getBindInfo() (string, string) {
+	fronts := strings.Split(binderFront, ",")
+	hosts := strings.Split(binderHost, ",")
+	randIdx := rand.Int() % len(fronts)
+	return fronts[randIdx], hosts[randIdx]
+}
+
 // find the fastest binder and stick to it
 func binderRace() {
-	log.Debug("starting binder race...")
-restart:
 	fronts := strings.Split(binderFront, ",")
 	hosts := strings.Split(binderHost, ",")
 	if len(fronts) != len(hosts) {
 		panic("binderFront and binderHost must be of identical length")
 	}
-	winner := make(chan int, 1000)
 	for i := 0; i < len(fronts); i++ {
 		i := i
-		bdc := bdclient.NewClient(fronts[i], hosts[i])
-		go func() {
-			_, err := bdc.GetClientInfo()
-			if err != nil {
-				log.Warnf("[%v %v] failed: %v", fronts[i], hosts[i], err)
-				return
-			}
-			winner <- i
-		}()
-	}
-	select {
-	case i := <-winner:
-		log.Debugf("[%v %v] won binder race", fronts[i], hosts[i])
-		binderFront = fronts[i]
-		binderHost = hosts[i]
-	case <-time.After(time.Second * 20):
-		goto restart
+		bdc := bdclient.NewClient(fronts[i], hosts[i], fmt.Sprintf("geph_client/%v", GitVersion))
+		binders = append(binders, bdc)
 	}
 }
 
 func main() {
 	debug.SetGCPercent(30)
-	runtime.GOMAXPROCS(1)
 	mrand.Seed(time.Now().UnixNano())
 	log.SetFormatter(&log.TextFormatter{
 		FullTimestamp: false,
@@ -120,8 +108,8 @@ func main() {
 	flag.StringVar(&username, "username", "", "username")
 	flag.StringVar(&password, "password", "", "password")
 	flag.StringVar(&ticketFile, "ticketFile", "", "location for caching auth tickets")
-	flag.StringVar(&binderFront, "binderFront", "https://www.cdn77.com/v2,https://netlify.com/front/v2,https://ajax.aspnetcdn.com/v2", "binder domain-fronting hosts, comma separated")
-	flag.StringVar(&binderHost, "binderHost", "1680337695.rsc.cdn77.org,gracious-payne-f3e2ed.netlify.com,gephbinder.azureedge.net", "real hostname of the binder, comma separated")
+	flag.StringVar(&binderFront, "binderFront", "https://www.cdn77.com/v2,https://netlify.com/v2,https://ajax.aspnetcdn.com/v2", "binder domain-fronting hosts, comma separated")
+	flag.StringVar(&binderHost, "binderHost", "1680337695.rsc.cdn77.org,loving-bell-981479.netlify.app,gephbinder-vzn.azureedge.net", "real hostname of the binder, comma separated")
 	flag.StringVar(&exitName, "exitName", "us-sfo-01.exits.geph.io", "qualified name of the exit node selected")
 	flag.StringVar(&exitKey, "exitKey", "2f8571e4795032433098af285c0ce9e43c973ac3ad71bf178e4f2aaa39794aec", "ed25519 pubkey of the selected exit")
 	flag.BoolVar(&forceBridges, "forceBridges", false, "force the use of obfuscated bridges")
@@ -133,28 +121,17 @@ func main() {
 	flag.BoolVar(&loginCheck, "loginCheck", false, "do a login check and immediately exit with code 0")
 	flag.StringVar(&binderProxy, "binderProxy", "", "if set, proxy the binder at the given listening address and do nothing else")
 	// flag.StringVar(&cachePath, "cachePath", os.TempDir()+"/geph-cache.db", "location of state cache")
+	flag.StringVar(&upstreamProxy, "upstreamProxy", "", "upstream SOCKS5 proxy")
+	flag.StringVar(&additionalBridges, "additionalBridges", "", "additional bridges, in the form of cookie1@host1;cookie2@host2 etc")
 	flag.StringVar(&singleHop, "singleHop", "", "if set in form pk@host:port, location of a single-hop server. OVERRIDES BINDER AND AUTHENTICATION!")
-	flag.BoolVar(&useTCP, "useTCP", false, "use TCP to connect to bridges")
-	flag.BoolVar(&noFEC, "noFEC", false, "disable automatic FEC")
+	flag.BoolVar(&bypassChinese, "bypassChinese", false, "bypass proxy for Chinese domains")
+	flag.BoolVar(&forceWarpfront, "forceWarpfront", false, "force use of warpfront")
 	iniflags.Parse()
-	if *cpuprofile != "" {
-		f, err := os.Create(*cpuprofile)
-		if err != nil {
-			log.Fatal("could not create CPU profile: ", err)
-		}
-		c := make(chan os.Signal)
-		signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-		if err := pprof.StartCPUProfile(f); err != nil {
-			log.Fatal("could not start CPU profile: ", err)
-		}
-		go func() {
-			<-c
-			pprof.StopCPUProfile()
-			f.Close()
-			debug.SetTraceback("all")
-			panic("TB")
-		}()
+	hackDNS()
+	if dnsAddr != "" {
+		go doDNS()
 	}
+	go listenStats()
 	if GitVersion == "" {
 		GitVersion = "NOVER"
 	}
@@ -174,11 +151,7 @@ func main() {
 			})
 		}
 	}()
-
-	if dnsAddr != "" {
-		go doDNS()
-	}
-	go listenStats()
+	binderRace()
 
 	log.Println("GephNG version", GitVersion)
 	log.Println("OS: ", runtime.GOOS)
@@ -192,20 +165,20 @@ func main() {
 		}()
 	}
 	if singleHop == "" {
-		binderRace()
 		if binderProxy != "" {
 			log.Println("binderProxy mode on", binderProxy)
-			binderURL, err := url.Parse(binderFront)
-			if err != nil {
-				panic(err)
-			}
 			revProx := &httputil.ReverseProxy{
 				Director: func(req *http.Request) {
+					bURL, bHost := getBindInfo()
+					bURLP, err := url.Parse(bURL)
+					if err != nil {
+						panic(err)
+					}
 					log.Println("reverse proxying", req.Method, req.URL)
-					req.Host = binderHost
-					req.URL.Scheme = binderURL.Scheme
-					req.URL.Host = binderURL.Host
-					req.URL.Path = binderURL.Path + "/" + req.URL.Path
+					req.Host = bHost
+					req.URL.Scheme = bURLP.Scheme
+					req.URL.Host = bURLP.Host
+					req.URL.Path = bURLP.Path + "/" + req.URL.Path
 				},
 				ModifyResponse: func(resp *http.Response) error {
 					resp.Header.Add("Access-Control-Allow-Origin", "*")
@@ -215,21 +188,23 @@ func main() {
 					return nil
 				},
 			}
-			if http.ListenAndServe(binderProxy, revProx) != nil {
+			if err := http.ListenAndServe(binderProxy, revProx); err != nil {
 				panic(err)
 			}
 		}
 
 		// connect to bridge
-		bindClient = bdclient.NewClient(binderFront, binderHost)
 		// automatically pick mode
-		if !forceBridges {
-			country, err := bindClient.GetClientInfo()
+		if upstreamProxy != "" {
+			log.Println("upstream proxy enabled, no bridges")
+			direct = true
+		} else if !forceBridges {
+			country, err := getBindClient().GetClientInfo()
 			if err != nil {
 				log.Println("cannot get country, conservatively using bridges", err)
 			} else {
 				log.Println("country is", country.Country)
-				if country.Country == "CN" || country.Country == "" {
+				if country.Country == "CN" {
 					log.Println("in CHINA, must use bridges")
 				} else {
 					log.Println("disabling bridges")
@@ -240,12 +215,17 @@ func main() {
 			direct = false
 		}
 	}
-	sWrap = newSmuxWrapper()
+	sWrap = newMultipool()
 
 	// confirm we are connected
 	func() {
 		for {
-			rm, _ := sWrap.DialCmd("ip")
+			rm, _, ok := sWrap.DialCmd("ip")
+			if !ok {
+				log.Println("FAILED to get IP, retrying...")
+				time.Sleep(time.Second)
+				continue
+			}
 			defer rm.Close()
 			var ip string
 			err := rlp.Decode(rm, &ip)

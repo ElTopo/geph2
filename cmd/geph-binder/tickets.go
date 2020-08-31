@@ -8,13 +8,17 @@ import (
 	"net/http"
 	"runtime"
 	"sort"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/cryptoballot/rsablind"
 	"github.com/geph-official/geph2/libs/bdclient"
+	"github.com/patrickmn/go-cache"
 )
 
 func handleGetTicketKey(w http.ResponseWriter, r *http.Request) {
+	countUserAgent(r)
 	// check type
 	key, err := getTicketIdentity(r.FormValue("tier"))
 	if err != nil {
@@ -25,6 +29,7 @@ func handleGetTicketKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleGetTier(w http.ResponseWriter, r *http.Request) {
+	countUserAgent(r)
 	// first authenticate
 	_, expiry, _, err := verifyUser(r.FormValue("user"), r.FormValue("pwd"))
 	if err != nil {
@@ -45,7 +50,12 @@ func init() {
 	cpuSemaphore = make(chan bool, runtime.GOMAXPROCS(0)*2)
 }
 
+var limiterCache sync.Map
+
+var goodIPCache = cache.New(time.Hour, time.Minute)
+
 func handleGetTicket(w http.ResponseWriter, r *http.Request) {
+	countUserAgent(r)
 	// first authenticate
 	uid, expiry, paytx, err := verifyUser(r.FormValue("user"), r.FormValue("pwd"))
 	if err != nil {
@@ -58,7 +68,15 @@ func handleGetTicket(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
-	log.Println("get-ticket: verified user", r.FormValue("user"), "as expiry", expiry)
+	// ticketLimiter, _ := limiterCache.LoadOrStore(uid, rate.NewLimiter(rate.Every(time.Minute*4), 100))
+	// if !ticketLimiter.(*rate.Limiter).Allow() {
+	// 	log.Println("*** VIOLATED LIMIT ", r.FormValue("user"))
+	// 	time.Sleep(time.Second * 10)
+	// 	w.WriteHeader(http.StatusTooManyRequests)
+	// 	return
+	// }
+	log.Println("verified", r.FormValue("user"))
+	//log.Println("get-ticket: verified user", r.FormValue("user"), "as expiry", expiry)
 	var tier string
 	if expiry.After(time.Now()) {
 		tier = "paid"
@@ -70,7 +88,7 @@ func handleGetTicket(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	log.Println("get-ticket: user", r.FormValue("user"), "sent us blinded of length", len(blinded))
+	//log.Println("get-ticket: user", r.FormValue("user"), "sent us blinded of length", len(blinded))
 	// get the key
 	key, err := getTicketIdentity(tier)
 	if err != nil {
@@ -102,9 +120,12 @@ func handleGetTicket(w http.ResponseWriter, r *http.Request) {
 		panic(err)
 	}
 	w.Write([]byte(b))
+	id := strings.Split(r.Header.Get("X-Forwarded-For"), ",")[0]
+	goodIPCache.SetDefault(id, uid)
 }
 
 func handleRedeemTicket(w http.ResponseWriter, r *http.Request) {
+	countUserAgent(r)
 	// check type
 	if tier := r.FormValue("tier"); tier != "free" && tier != "paid" {
 		log.Println("bad tier:", tier)

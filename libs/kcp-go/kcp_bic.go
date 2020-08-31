@@ -6,14 +6,14 @@ import (
 	"time"
 )
 
-const bicMultiplier = 8
+const bicMultiplier = 1
 
 func (kcp *KCP) cubic_onloss(lost []uint32) {
 	kcp.wmax = kcp.cwnd
 	kcp.cwnd *= (2 - cubicB) / 2
 	kcp.lastLoss = time.Now()
-	if kcp.cwnd < 16 {
-		kcp.cwnd = 16
+	if kcp.cwnd < 32 {
+		kcp.cwnd = 32
 	}
 	log.Println("wmax at", int(kcp.cwnd))
 }
@@ -37,13 +37,20 @@ func (kcp *KCP) bic_onloss(lost []uint32) {
 	// if maxRun < int(kcp.cwnd/20) || maxRun < 10 {
 	// 	return
 	// }
-	beta := 0.01 / bicMultiplier
+	beta := 0.05 / bicMultiplier
 	if kcp.cwnd < kcp.wmax {
 		kcp.wmax = kcp.cwnd * (2.0 - beta) / 2.0
 	} else {
 		kcp.wmax = kcp.cwnd
 	}
 	kcp.cwnd = kcp.cwnd * (1.0 - beta)
+	mincwnd := kcp.bdp() / float64(kcp.mss)
+	if kcp.cwnd < mincwnd {
+		kcp.cwnd = mincwnd
+	}
+	if kcp.cwnd < 32 {
+		kcp.cwnd = 32
+	}
 }
 
 const (
@@ -80,8 +87,8 @@ func (kcp *KCP) bic_onack(acks int32) {
 		if bicinc <= 1 {
 			bicinc = 1
 		} else {
-			if bicinc > 64 {
-				bicinc = 64
+			if bicinc > 128 {
+				bicinc = 128
 			}
 		}
 		kcp.cwnd += bicinc / kcp.cwnd

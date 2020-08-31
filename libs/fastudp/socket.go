@@ -12,7 +12,7 @@ import (
 	"gopkg.in/tomb.v1"
 )
 
-const sendQuantum = 16
+const sendQuantum = 128
 
 // Conn wraps an underlying UDPConn and batches stuff to it.
 type Conn struct {
@@ -27,14 +27,14 @@ type Conn struct {
 
 // NewConn creates a new Conn.
 func NewConn(conn *net.UDPConn) net.PacketConn {
-	// err := conn.SetWriteBuffer(261244)
-	// if err != nil {
-	// 	panic(err)
-	// }
-	// err = conn.SetReadBuffer(261244)
-	// if err != nil {
-	// 	panic(err)
-	// }
+	err := conn.SetWriteBuffer(261244)
+	if err != nil {
+		panic(err)
+	}
+	err = conn.SetReadBuffer(261244)
+	if err != nil {
+		panic(err)
+	}
 	//return conn
 	if runtime.GOOS != "linux" {
 		return conn
@@ -55,8 +55,8 @@ func NewConn(conn *net.UDPConn) net.PacketConn {
 	return c
 }
 
-// 100Hz syscall limiter
-var limiter = rate.NewLimiter(100, 100)
+// 1000Hz syscall limiter
+var limiter = rate.NewLimiter(1000, 100)
 
 var spamLimiter = rate.NewLimiter(1, 10)
 
@@ -80,21 +80,19 @@ func (conn *Conn) bkgWrite() {
 				}
 			}
 		out:
-			ptr := towrite
-			for len(ptr) > 0 {
-				n, err := conn.pconn.WriteBatch(ptr, 0)
+			for len(towrite) > 0 {
+				n, err := conn.pconn.WriteBatch(towrite, 0)
 				if err != nil {
 					log.Println("kill", err)
 					conn.death.Kill(err)
 					return
 				}
 				for i := 0; i < n; i++ {
-					free(ptr[i].Buffers[0])
-					ptr[i].Buffers = nil
+					free(towrite[i].Buffers[0])
+					towrite[i].Buffers = nil
 				}
-				ptr = ptr[n:]
+				towrite = towrite[n:]
 			}
-			towrite = towrite[:0]
 		case <-conn.death.Dying():
 			return
 		}
@@ -147,7 +145,7 @@ func (conn *Conn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		err = conn.death.Err()
 		return
 		// default:
-		// 	log.Println("fastudp: write to", addr, "overflowed")
+		// 	free(pCopy)
 	}
 	return len(p), nil
 }

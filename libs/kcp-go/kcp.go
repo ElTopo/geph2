@@ -39,9 +39,9 @@ const (
 	IKCP_PROBE_LIMIT = 120000 // up to 120 secs to probe window
 )
 
-var QuiescentMax = 100
+var QuiescentMax = 20
 
-var CongestionControl = "LOL"
+var CongestionControl = "BIC"
 
 var doLogging = false
 
@@ -149,7 +149,7 @@ func (seg *segment) encode(ptr []byte) []byte {
 	return ptr
 }
 
-const maxSpeed = 1000 * 1000 * 100
+const maxSpeed = 1000 * 1000 * 1000
 
 type rateLimiter struct {
 	limiter *rate.Limiter
@@ -292,7 +292,7 @@ func NewKCP(conv uint32, output output_callback) *KCP {
 	kcp.DRE.ppDelivered = make(map[uint32]float64)
 	kcp.DRE.ppAppLimited = make(map[uint32]bool)
 	kcp.LOL.gain = 1
-	kcp.LOL.bdpMultiplier = 3
+	kcp.LOL.bdpMultiplier = 1.5
 	kcp.quiescent = QuiescentMax
 	kcp.fecRate = 0
 	if CongestionControl == "BBR" {
@@ -527,7 +527,7 @@ func (kcp *KCP) update_ack(rtt int32) {
 	// if kcp.rx_rto < 500 {
 	// 	kcp.rx_rto = 500
 	// }
-	kcp.rx_rto += 300
+	kcp.rx_rto += 500
 }
 
 func (kcp *KCP) shrink_buf() {
@@ -805,7 +805,7 @@ func (kcp *KCP) Input(data []byte, regular, ackNoDelay bool) int {
 				bdp := kcp.bdp() / float64(kcp.mss)
 				targetCwnd := bdp*kcp.LOL.bdpMultiplier + 64
 				if targetCwnd > kcp.cwnd+float64(acks) {
-					kcp.cwnd += math.Min(float64(acks), 32*float64(acks)/kcp.cwnd)
+					kcp.cwnd += float64(acks)
 				} else {
 					kcp.cwnd = targetCwnd
 				}
@@ -833,29 +833,15 @@ func (kcp *KCP) Input(data []byte, regular, ackNoDelay bool) int {
 					}
 				} else {
 					// vibrate the gain up and down every 50 rtts
-					period := float64(time.Now().UnixNano()) / 1e6 / kcp.DRE.minRtt
-					kcp.LOL.gain = math.Sin(period*(2*math.Pi)/10)*0.25 + 1
-					// if period%2 == 0 {
-					// 	kcp.LOL.gain = 1.25
-					// } else if period%2 == 1 {
-					// 	kcp.LOL.gain = 0.75
-					// } else {
-					// 	kcp.LOL.gain = 1
-					// }
-					// if period%100 == 0 {
-					// 	kcp.LOL.gain = 0.2
-					// }
-					// if period%3 == 0 {
-					// 	kcp.LOL.gain = 1.5
-					// } else if period%3 == 1 {
-					// 	if float64(len(kcp.snd_buf)) > bdp {
-					// 		kcp.LOL.gain = 0.25
-					// 	} else {
-					// 		kcp.LOL.gain = 0.5
-					// 	}
-					// } else {
-					// 	kcp.LOL.gain = 1
-					// }
+					period := currentMs() / uint32(math.Max(1, kcp.DRE.minRtt))
+					//kcp.LOL.gain = math.Sin(period*(2*math.Pi)/4)*0.25 + 1
+					if period%10 == 0 && kcp.DRE.lastLoss < 0.03 {
+						kcp.LOL.gain = 1.5
+					} else if period%10 == 1 {
+						kcp.LOL.gain = 0.5
+					} else {
+						kcp.LOL.gain = 0.95
+					}
 				}
 
 				if doLogging {
@@ -866,13 +852,13 @@ func (kcp *KCP) Input(data []byte, regular, ackNoDelay bool) int {
 						int(kcp.cwnd), int(bdp), kcp.LOL.gain,
 						kcp.rttProp(),
 						kcp.rx_rttvar,
-						100*float64(kcp.retrans)/float64(kcp.trans))
+						100*float64(kcp.DRE.lastLoss))
 				}
 			}
 		}
 	}
 
-	if len(kcp.acklist) >= 16 || (ackNoDelay && len(kcp.acklist) > 0) { // ack immediately
+	if len(kcp.acklist) >= 128 || (ackNoDelay && len(kcp.acklist) > 0) { // ack immediately
 		kcp.flush(true)
 	}
 	return 0
@@ -903,9 +889,9 @@ func (kcp *KCP) updateSample(appLimited bool) {
 		//avgRate = kcp.DRE.avgAckRate
 		if kcp.DRE.maxAckRate < avgRate || (!appLimited && float64(time.Since(kcp.DRE.maxAckTime).Milliseconds()) > kcp.rttProp()*10) {
 			kcp.DRE.maxAckRate = avgRate
-			if kcp.DRE.maxAckRate < 200*1000 {
-				kcp.DRE.maxAckRate = 200 * 1000
-			}
+			// if kcp.DRE.maxAckRate < 200*1000 {
+			// 	kcp.DRE.maxAckRate = 200 * 1000
+			// }
 			kcp.DRE.maxAckTime = kcp.DRE.delTime
 			if time.Since(kcp.DRE.policeTime).Seconds() < 20 && kcp.DRE.maxAckRate > kcp.DRE.policeRate {
 				kcp.DRE.maxAckRate = kcp.DRE.policeRate
@@ -1119,6 +1105,7 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 			change++
 			earlyRetransSegs++
 			lostSn = append(lostSn, segment.sn)
+			//log.Println("early", segment.sn)
 		} else if _itimediff(current, segment.resendts) >= 0 { // RTO
 			needsend = true
 			// if kcp.nodelay == 0 {
@@ -1126,10 +1113,10 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 			// } else {
 			// 	segment.rto += kcp.rx_rto / 2
 			// }
-			segment.rto += segment.rto / 2
+			segment.rto += segment.rto
 			segment.fastack = 0
 			segment.resendts = current + segment.rto
-			if segment.rto > IKCP_RTO_MAX {
+			if segment.rto > IKCP_RTO_MAX*4 {
 				if doLogging {
 					log.Printf("[%p] self-destruct due to far too long RTO", kcp)
 				}
@@ -1141,6 +1128,7 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 			// 	log.Printf("[%p] RTO on %v %v", kcp, segment.sn, segment.rto)
 			// }
 			lostSn = append(lostSn, segment.sn)
+			//log.Println("rto", segment.sn)
 		}
 
 		if needsend {
@@ -1215,22 +1203,22 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 					log.Printf("[%p] Loss-to-loss delivery rate: %vK @ %.2f%%", kcp, int(rate/1000), loss*100)
 				}
 				now := time.Now()
-				if loss > 0.1 {
-					kcp.LOL.bdpMultiplier = kcp.LOL.bdpMultiplier*0.7 + 0.3
-				}
-				if loss < 0.05 {
-					kcp.LOL.bdpMultiplier = kcp.LOL.bdpMultiplier*0.9 + 0.1*3
-				}
-				if doLogging {
-					log.Println("bdpMultiplier =>", kcp.LOL.bdpMultiplier)
-				}
-				if rate > 1000*1000 && loss+kcp.DRE.lastLoss > 0.2 && math.Abs(kcp.DRE.lastLossRate-rate) < rate/5 {
-					// if doLogging {
-					// 	log.Printf("[%p] ****** POLICE ******", kcp)
-					// }
-					// kcp.DRE.policeRate = (rate + kcp.DRE.lastLossRate) / 2
-					// kcp.DRE.policeTime = now
-				}
+				// if loss > 0.1 {
+				// 	kcp.LOL.bdpMultiplier = kcp.LOL.bdpMultiplier*0.7 + 0.3
+				// }
+				// if loss < 0.05 {
+				// 	kcp.LOL.bdpMultiplier = kcp.LOL.bdpMultiplier*0.9 + 0.1*3
+				// }
+				// if doLogging {
+				// 	log.Println("bdpMultiplier =>", kcp.LOL.bdpMultiplier)
+				// }
+				// if rate > 400*1000 && loss+kcp.DRE.lastLoss > 0.3 && math.Abs(kcp.DRE.lastLossRate-rate) < rate/5 {
+				// 	if doLogging {
+				// 		log.Printf("[%p] ****** POLICE ******", kcp)
+				// 	}
+				// 	kcp.DRE.policeRate = (rate + kcp.DRE.lastLossRate) / 2
+				// 	kcp.DRE.policeTime = now
+				// }
 				kcp.DRE.lastLossTime = now
 				kcp.DRE.lastLossDel = kcp.DRE.delivered
 				kcp.DRE.lastLossTrans = kcp.trans
